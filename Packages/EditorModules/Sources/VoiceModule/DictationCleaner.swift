@@ -2,9 +2,10 @@ import Foundation
 
 /// Limpieza local del dictado, sin red ni modelos externos.
 ///
-/// Orden: muletillas fuera, puntuación dictada (`coma` → `,`), correcciones
-/// del usuario y estilo formal opcional (mayúscula inicial y punto final,
-/// como en documentos y correo).
+/// Orden: muletillas fuera, puntuación y saltos dictados (`coma` → `,`,
+/// `nuevo párrafo` → línea en blanco), correcciones del usuario y estilo
+/// formal opcional (mayúscula inicial y punto final, como en documentos y
+/// correo).
 ///
 /// Versión recortada de `DictationNormalizer` de LocalFlow
 /// (`MiyuWisp/LocalFlow/LocalFlow/Intelligence/DictationNormalizer.swift`).
@@ -34,7 +35,12 @@ public struct DictationCleaner: Sendable {
         if formal {
             text = applyingFormalStyle(text)
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmingSpaces(text)
+    }
+
+    /// Quita espacios de los bordes y conserva los saltos de línea dictados.
+    private func trimmingSpaces(_ text: String) -> String {
+        text.replacingOccurrences(of: #"^[^\S\r\n]+|[^\S\r\n]+$"#, with: "", options: .regularExpression)
     }
 
     // MARK: - Muletillas
@@ -55,11 +61,20 @@ public struct DictationCleaner: Sendable {
 
     // MARK: - Puntuación dictada
 
-    /// Convierte palabras de puntuación en signos. `punto` no se toca dentro
-    /// de locuciones (`punto de encuentro`, `punto final`).
+    /// Convierte palabras de puntuación en signos y los saltos dictados en
+    /// saltos reales. `punto` y `nueva línea` no se tocan dentro de locuciones
+    /// (`punto de encuentro`, `punto final`, `nueva línea de productos`).
     private func applyingSpokenPunctuation(_ text: String) -> String {
         var out = text
         let phrases: [(pattern: String, replacement: String)] = [
+            (#"(?i)\bpunto y aparte\b"#, ".\n\n"),
+            (#"(?i)\bpunto y seguido\b"#, "."),
+            (#"(?i)\b(nuevo p[áa]rrafo|p[áa]rrafo nuevo)\b"#, "\n\n"),
+            (#"(?i)\b(nueva l[íi]nea|salto de l[íi]nea)\b(?!\s+de\b|\s+del\b)"#, "\n"),
+            (#"(?i)\babre (signo de )?interrogaci[óo]n\b"#, "¿"),
+            (#"(?i)\bcierra (signo de )?interrogaci[óo]n\b"#, "?"),
+            (#"(?i)\babre (signo de )?(exclamaci[óo]n|admiraci[óo]n)\b"#, "¡"),
+            (#"(?i)\bcierra (signo de )?(exclamaci[óo]n|admiraci[óo]n)\b"#, "!"),
             (#"(?i)\bpunto y coma\b"#, ";"),
             (#"(?i)\bdos puntos\b"#, ":"),
             (#"(?i)\bpuntos suspensivos\b"#, "…"),
@@ -73,38 +88,47 @@ public struct DictationCleaner: Sendable {
         for (pattern, replacement) in phrases {
             out = out.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
         }
-        out = out.replacingOccurrences(of: #"\s+([,.;:?!…%])"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"[^\S\r\n]+([,.;:?!…%])"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"([¿¡])[^\S\r\n]+"#, with: "$1", options: .regularExpression)
         out = out.replacingOccurrences(of: #"\s*@\s*"#, with: "@", options: .regularExpression)
         out = out.replacingOccurrences(of: #"[^\S\r\n]+"#, with: " ", options: .regularExpression)
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Sin espacios colgando alrededor de un salto ni más de una línea en blanco.
+        out = out.replacingOccurrences(of: #"[^\S\r\n]*\n[^\S\r\n]*"#, with: "\n", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return trimmingSpaces(out)
     }
 
     // MARK: - Estilo
 
+    /// Mayúscula al empezar, tras fin de oración y en cada línea nueva; punto
+    /// al final de cada línea que termine en letra o número.
     private func applyingFormalStyle(_ text: String) -> String {
-        var out = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !out.isEmpty else { return text }
-        if let first = out.first {
-            out.replaceSubrange(out.startIndex...out.startIndex, with: String(first).uppercased())
-        }
-        var chars = Array(out)
-        var i = 0
-        while i < chars.count {
-            if ".?!…".contains(chars[i]) {
-                var j = i + 1
-                while j < chars.count && chars[j].isWhitespace && chars[j] != "\n" { j += 1 }
-                if j < chars.count && chars[j].isLetter {
-                    chars[j] = Character(String(chars[j]).uppercased())
-                }
-                i = j
+        guard !text.isEmpty else { return text }
+        var out = ""
+        var capitalize = true
+        var sentenceEnded = false
+        for char in text {
+            if char == "\n" {
+                capitalize = true
+                sentenceEnded = false
+            } else if char.isWhitespace {
+                if sentenceEnded { capitalize = true }
+                sentenceEnded = false
+            } else if ".?!…".contains(char) {
+                capitalize = false
+                sentenceEnded = true
+            } else if char.isLetter {
+                out += capitalize ? String(char).uppercased() : String(char)
+                capitalize = false
+                sentenceEnded = false
+                continue
+            } else if !"¿¡\"«(".contains(char) {
+                capitalize = false
+                sentenceEnded = false
             }
-            i += 1
+            out.append(char)
         }
-        out = String(chars)
-        if let last = out.last, last.isLetter || last.isNumber {
-            out.append(".")
-        }
-        return out
+        return out.replacingOccurrences(of: #"(?<=[\p{L}\p{N}])(?=\n|\z)"#, with: ".", options: .regularExpression)
     }
 
     private func replacingWord(_ text: String, variant: String, canonical: String) -> String {

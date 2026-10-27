@@ -195,7 +195,8 @@ struct EditorApp: App {
                         session?.textLocation(atNormalizedPoint: point)
                     }
                     voice.prepareRewrite = { [weak session] instruction in
-                        await session?.prepareRewrite(instruction: instruction)
+                        guard let session else { throw CancellationError() }
+                        return try await session.prepareRewrite(instruction: instruction)
                     }
                     voice.acceptRewrite = { [weak session] in session?.acceptRewrite() == true }
                     voice.discardRewrite = { [weak session] in session?.discardRewrite() }
