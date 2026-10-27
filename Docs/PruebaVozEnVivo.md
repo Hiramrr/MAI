@@ -83,6 +83,9 @@ Anota la duración entre terminar de hablar y ver la propuesta. Ajusta
 sesiones con distinto micrófono como si midieran solo el temporizador.
 
 El cierre también espera 1.6 s sin voz en el micrófono. Repite una ronda con
-ruido de fondo constante (ventilador) y anota si la frase se cierra sola. En
-otra ronda pulsa «Descartar» mientras aparece «Preparando micrófono…» y
+ruido de fondo constante (ventilador) y anota si la frase se cierra sola.
+Si ese ruido supera el umbral, usa Terminar o push-to-talk. Comprueba además
+que una frase de diez segundos y la voz baja no se corten mientras el audio
+siga por encima del umbral. En otra ronda pulsa «Descartar» mientras aparece
+«Preparando micrófono…» y
 comprueba que el indicador de micrófono de macOS no se enciende después.

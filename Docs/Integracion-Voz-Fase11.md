@@ -68,11 +68,11 @@ cambio pendiente, sigue escuchando «confirmar», «descartar», «repetir» o
 cierra solo. El umbral aún requiere medición con micrófono real.
 
 Actualización: el cierre también exige 1.6 s sin voz en el micrófono. Un
-nivel cuenta como voz si supera el umbral del reconocedor y el ruido de
-fondo más un margen; el ruido se estima en cada escucha (baja en el acto y
-sube despacio). Así, si Speech se atrasa mientras se sigue hablando, no se
-corta; push-to-talk sigue cerrando solo al soltar. Si `stop()` falla con
-texto reconocido, el panel muestra el error y el texto aparte para copiarlo,
+nivel cuenta como voz si supera el umbral del reconocedor. Ese umbral no
+sube durante el habla, de modo que un nivel sostenido no acaba contando
+como silencio si Speech se atrasa. Si el ruido continuo supera el umbral,
+hay que pulsar Terminar o usar push-to-talk, que cierra solo al soltar.
+Si `stop()` falla con texto reconocido, el panel muestra el error y el texto aparte para copiarlo,
 insertarlo como texto incompleto o descartarlo; no se ejecuta como orden ni se
 inserta solo, y no se empieza otra grabación hasta decidir. Cancelar mientras
 se piden permisos o se descarga el modelo vuelve al momento: el reconocedor

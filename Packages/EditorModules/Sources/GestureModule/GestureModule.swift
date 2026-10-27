@@ -167,6 +167,7 @@ public final class GestureModule: EditorInputModule {
     // Instantánea del documento (la empuja la app, sin vistas de por medio).
     var cachedText = ""
     var cachedSelection = NSRange(location: 0, length: 0)
+    @ObservationIgnored var lengthDocument: MarkdownDocument?
     private var rangedText = ""
     private var cachedWordRanges: [NSRange] = []
     private var paragraphText = ""
@@ -315,10 +316,13 @@ public final class GestureModule: EditorInputModule {
     /// La app empuja texto+selección (valores, sin vistas). Barato: los rangos
     /// de palabra se recalculan bajo demanda, no en cada pulsación.
     public func updateDocument(text: String, selection: NSRange) {
-        if paragraphDragSource != nil, text != cachedText {
-            paragraphDragSource = nil
-            paragraphDropTarget = nil
-            requiresRelease = true
+        if text != cachedText {
+            lengthDocument = nil
+            if paragraphDragSource != nil {
+                paragraphDragSource = nil
+                paragraphDropTarget = nil
+                requiresRelease = true
+            }
         }
         cachedText = text
         cachedSelection = selection

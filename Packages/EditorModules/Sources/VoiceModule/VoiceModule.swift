@@ -117,15 +117,8 @@ public final class VoiceModule: EditorInputModule {
     private var recognitionGeneration = 0
     private var lastSeenPartial = ""
     private var lastPartialChange = Date()
-    /// Último buffer con voz por encima del ruido de fondo.
+    /// Último buffer por encima del umbral del reconocedor.
     private var lastVoiceActivity = Date()
-    /// Nivel del ruido de fondo: baja en el acto con el nivel y sube despacio,
-    /// así un ventilador constante deja de contar como voz. Empieza en 0:
-    /// mientras aprende el ruido, se peca de seguir escuchando, no de cortar.
-    private var noiseFloor: Float = 0
-    private static let noiseFloorRise: Float = 0.01
-    /// Margen sobre el ruido (escala de `onLevel`: 0.12 ≈ 7 dB).
-    private static let voiceAboveNoise: Float = 0.12
     /// Reloj del cierre por pausa; las pruebas lo sustituyen para no esperar.
     var now: @MainActor () -> Date = { Date() }
     /// Idioma del dictado (`es-MX`, `es-ES`, `en-US`).
@@ -475,7 +468,6 @@ public final class VoiceModule: EditorInputModule {
         lastSeenPartial = ""
         lastPartialChange = now()
         lastVoiceActivity = now()
-        noiseFloor = 0
         monitorTask = Task { [weak self] in
             while let self, !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(200))
@@ -513,12 +505,11 @@ public final class VoiceModule: EditorInputModule {
                                     timeout: autoEndpointSilence)
     }
 
-    /// Un nivel claramente por encima del ruido de fondo y del umbral del
-    /// reconocedor cuenta como voz reciente. Interna para pruebas.
+    /// Un nivel sostenido puede ser voz: no se aprende como ruido ni se
+    /// eleva el umbral mientras se habla. Interna para pruebas.
     func noteInputLevel(_ level: Float) {
         guard isListening else { return }
-        noiseFloor = min(level, noiseFloor + Self.noiseFloorRise)
-        if level > max(recognizer.voiceThreshold, noiseFloor + Self.voiceAboveNoise) {
+        if level > recognizer.voiceThreshold {
             lastVoiceActivity = now()
         }
     }

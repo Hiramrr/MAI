@@ -699,6 +699,61 @@ extension GestureIntegrationTests {
         XCTAssertEqual(provider.calls, 0)
     }
 
+    @MainActor func testLengthRefusesInlineEmphasisWithoutCallingModel() async throws {
+        for emphasis in ["**importante**", "__importante__", "*importante*", "_importante_", "***importante***", "~~importante~~"] {
+            let text = "Esta información es \(emphasis) para completar el trabajo de mañana."
+            let provider = ScriptedLengthProvider(.success(VariantPair(Self.validShort, Self.validLong)))
+            let module = GestureModule(lengthProvider: provider)
+            module.updateDocument(text: text, selection: NSRange(location: 5, length: 0))
+            await module.startLengthSessionManually()
+            await pump()
+            XCTAssertFalse(module.hasLengthSession, text)
+            XCTAssertTrue(module.message.contains("formato"), module.message)
+            XCTAssertEqual(provider.calls, 0, text)
+        }
+    }
+
+    func testLengthAllowsLiteralAsterisksAndUnderscores() {
+        for text in ["El campo user_name identifica a la persona.", "Calcula 2 * 3 para obtener el resultado.", #"Conserva \*esta marca\* como texto literal."#] {
+            XCTAssertEqual(GestureModule.lengthTarget(in: text, at: 5),
+                           .prose(NSRange(location: 0, length: (text as NSString).length)))
+        }
+    }
+
+    @MainActor func testLengthAnalysisTracksSelectionAndDocumentChanges() {
+        let module = GestureModule()
+        let prose = Self.lengthParagraph
+        let fenced = "```\n\(prose)\n```\n\n\(prose)"
+        let codeRange = (fenced as NSString).range(of: prose)
+        let proseRange = (fenced as NSString).range(of: prose, options: .backwards)
+        module.updateDocument(text: fenced, selection: NSRange(location: codeRange.location, length: 0))
+        guard case .refused = module.paragraphForLength() else { return XCTFail("código delimitado") }
+
+        module.updateDocument(text: fenced, selection: NSRange(location: proseRange.location, length: 0))
+        XCTAssertEqual(module.paragraphForLength(), .prose(proseRange))
+
+        module.updateDocument(text: prose, selection: NSRange(location: 0, length: 0))
+        XCTAssertEqual(module.paragraphForLength(), .prose(NSRange(location: 0, length: (prose as NSString).length)))
+
+        module.updateDocument(text: fenced, selection: NSRange(location: codeRange.location, length: 0))
+        guard case .refused = module.paragraphForLength() else { return XCTFail("la edición invalida el análisis anterior") }
+        module.updateDocument(text: "", selection: NSRange(location: 0, length: 0))
+        XCTAssertEqual(module.paragraphForLength(), .none)
+    }
+
+    @MainActor func testRepeatedLengthLookupOnLargeDocument() {
+        let text = String(repeating: "Un párrafo de prosa para probar la búsqueda.\n", count: 25_000) + "\n"
+        let module = GestureModule()
+        module.updateDocument(text: text, selection: NSRange(location: (text as NSString).length - 1, length: 0))
+        XCTAssertEqual(module.paragraphForLength(), .none)
+        let clock = ContinuousClock()
+        let start = clock.now
+        for _ in 0..<50 { XCTAssertEqual(module.paragraphForLength(), .none) }
+        let elapsed = clock.now - start
+        XCTAssertLessThan(elapsed, .seconds(1), "los fotogramas no deben volver a analizar todo el documento")
+        print("LENGTH LOOKUP: 50 búsquedas en \(text.count) caracteres: \(elapsed)")
+    }
+
     @MainActor func testTwoHandLengthRefusesTableRow() async throws {
         let text = "| Tema | Nota |\n| --- | --- |\n| uno dos tres | cuatro |\n"
         let provider = ScriptedLengthProvider(.success(VariantPair(Self.validShort, Self.validLong)))

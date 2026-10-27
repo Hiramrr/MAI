@@ -1192,10 +1192,10 @@ final class VoiceEndpointActivityTests: XCTestCase {
         mock.onPartial?("hola")
         await pump()
         XCTAssertFalse(module.autoFinishDue(), "el primer vistazo anota el cambio")
-        for _ in 0..<20 {
-            clock.advance(0.2)
+        for _ in 0..<120 {
+            clock.advance(4096.0 / 48_000)
             module.noteInputLevel(0.6)
-            XCTAssertFalse(module.autoFinishDue(), "no se corta mientras hay voz")
+            if module.autoFinishDue() { return XCTFail("no se corta mientras hay voz sostenida") }
         }
         XCTAssertTrue(module.isListening)
     }
@@ -1237,20 +1237,31 @@ final class VoiceEndpointActivityTests: XCTestCase {
         XCTAssertTrue(module.autoFinishDue())
     }
 
-    /// Ruido constante: el suelo de ruido sube y deja de contar como voz.
-    @MainActor func testConstantNoiseStopsCountingAsSpeech() async throws {
+    /// El nivel por sí solo no permite distinguir voz sostenida de ruido.
+    @MainActor func testConstantAudioAboveThresholdDoesNotBecomeSilence() async throws {
         let (module, mock, clock) = try await handsFreeModule()
         defer { Task { await module.stop() } }
         mock.onPartial?("hola")
         await pump()
         XCTAssertFalse(module.autoFinishDue())
-        var finished = false
-        for _ in 0..<60 where !finished {
+        for _ in 0..<120 {
             clock.advance(0.1)
             module.noteInputLevel(0.3)
-            finished = module.autoFinishDue()
+            if module.autoFinishDue() { return XCTFail("un nivel sostenido no demuestra que haya silencio") }
         }
-        XCTAssertTrue(finished, "un ventilador no impide cerrar para siempre")
+    }
+
+    @MainActor func testQuietVoiceAboveRecognizerThresholdKeepsListening() async throws {
+        let (module, mock, clock) = try await handsFreeModule()
+        defer { Task { await module.stop() } }
+        mock.onPartial?("hola")
+        await pump()
+        _ = module.autoFinishDue()
+        for _ in 0..<120 {
+            clock.advance(0.1)
+            module.noteInputLevel(mock.voiceThreshold + 0.01)
+            if module.autoFinishDue() { return XCTFail("el cierre debe respetar el umbral del reconocedor") }
+        }
     }
 
     /// Push-to-talk no cierra por pausa: cierra al soltar.

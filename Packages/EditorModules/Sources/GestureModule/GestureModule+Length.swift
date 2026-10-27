@@ -127,12 +127,21 @@ extension GestureModule {
     /// la línea no lleve comillas invertidas. En citas y listas solo se
     /// reescribe el texto tras la marca, que se conserva.
     nonisolated static func lengthTarget(in text: String, at caret: Int) -> LengthTarget {
-        let ns = text as NSString
-        guard ns.length > 0 else { return .none }
-        let caret = min(max(caret, 0), ns.length - 1)
-        guard let line = MarkdownDocument(text).lines.first(where: { NSLocationInRange(caret, $0.range) }) else {
-            return .none
+        lengthTarget(in: MarkdownDocument(text), at: caret)
+    }
+
+    private nonisolated static func lengthTarget(in document: MarkdownDocument, at caret: Int) -> LengthTarget {
+        guard let last = document.lines.last, NSMaxRange(last.range) > 0 else { return .none }
+        let caret = min(max(caret, 0), NSMaxRange(last.range) - 1)
+        var lower = 0
+        var upper = document.lines.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if NSMaxRange(document.lines[middle].range) <= caret { lower = middle + 1 }
+            else { upper = middle }
         }
+        guard lower < document.lines.count else { return .none }
+        let line = document.lines[lower]
         switch line.kind {
         case .code, .fence:
             return .refused("Este párrafo es código: la longitud solo cambia prosa.")
@@ -155,12 +164,24 @@ extension GestureModule {
             || body.range(of: #"</?[A-Za-z][^>]*>"#, options: .regularExpression) != nil {
             return .refused("Este párrafo tiene enlaces, imágenes, código o HTML: la IA podría romperlos. Edítalo a mano.")
         }
+        if body.contains("*") || body.contains("_") || body.contains("~") {
+            let refusal = LengthTarget.refused("Este párrafo tiene formato en línea. Edítalo a mano para conservarlo.")
+            guard let parsed = try? AttributedString(markdown: body, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else {
+                return refusal
+            }
+            if parsed.runs.contains(where: { run in
+                guard let intent = run.inlinePresentationIntent else { return false }
+                return intent.contains(.stronglyEmphasized) || intent.contains(.emphasized) || intent.contains(.strikethrough)
+            }) { return refusal }
+        }
         return .prose(NSRange(location: line.range.location + line.prefixLength, length: (body as NSString).length))
     }
 
-    private func paragraphForLength() -> LengthTarget {
+    func paragraphForLength() -> LengthTarget {
         guard imageAtSelection() == nil else { return .none }
-        return Self.lengthTarget(in: cachedText, at: cachedSelection.location)
+        let document = lengthDocument ?? MarkdownDocument(cachedText)
+        lengthDocument = document
+        return Self.lengthTarget(in: document, at: cachedSelection.location)
     }
 
     /// Avisa por qué no se abre la sesión. Devuelve el párrafo si se puede.
