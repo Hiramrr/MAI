@@ -121,25 +121,70 @@ extension GestureModule {
         }
     }
 
-    private func paragraphForLength() -> (text: String, range: NSRange)? {
-        guard imageAtSelection() == nil else { return nil }
-        let full = cachedText as NSString
-        guard full.length > 0 else { return nil }
-        let caret = min(max(cachedSelection.location, 0), full.length - 1)
-        var para = full.paragraphRange(for: NSRange(location: caret, length: 0))
-        while para.length > 0, NSMaxRange(para) <= full.length,
-              full.character(at: NSMaxRange(para) - 1) == 10 {
-            para.length -= 1
+    /// Párrafo de prosa bajo el cursor o el motivo concreto por el que no
+    /// se puede cambiar su longitud. Usa el mismo análisis Markdown del
+    /// editor: el interior de un bloque de código cuenta como código aunque
+    /// la línea no lleve comillas invertidas. En citas y listas solo se
+    /// reescribe el texto tras la marca, que se conserva.
+    nonisolated static func lengthTarget(in text: String, at caret: Int) -> LengthTarget {
+        let ns = text as NSString
+        guard ns.length > 0 else { return .none }
+        let caret = min(max(caret, 0), ns.length - 1)
+        guard let line = MarkdownDocument(text).lines.first(where: { NSLocationInRange(caret, $0.range) }) else {
+            return .none
         }
-        let text = full.substring(with: para).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        return (full.substring(with: para), para)
+        switch line.kind {
+        case .code, .fence:
+            return .refused("Este párrafo es código: la longitud solo cambia prosa.")
+        case .tableRow, .tableDelimiter:
+            return .refused("Esta línea es una fila de tabla: la longitud solo cambia prosa.")
+        case .heading:
+            return .refused("Esta línea es un título: la longitud solo cambia párrafos de prosa.")
+        case .rule, .hidden:
+            return .refused("Esta línea es una marca de Markdown, no prosa.")
+        case .text, .quote, .list, .orderedList, .taskList:
+            break
+        }
+        let body = line.content
+        guard body.rangeOfCharacter(from: .letters) != nil else { return .none }
+        // Una cita que contiene una lista (o al revés) sigue siendo estructura.
+        guard MarkdownDocument(body).lines.first?.kind == .text else {
+            return .refused("Este párrafo combina varias marcas de Markdown (cita, lista o título). Edítalo a mano.")
+        }
+        if ["](", "![", "][", "[^", "`", "://"].contains(where: body.contains)
+            || body.range(of: #"</?[A-Za-z][^>]*>"#, options: .regularExpression) != nil {
+            return .refused("Este párrafo tiene enlaces, imágenes, código o HTML: la IA podría romperlos. Edítalo a mano.")
+        }
+        return .prose(NSRange(location: line.range.location + line.prefixLength, length: (body as NSString).length))
+    }
+
+    private func paragraphForLength() -> LengthTarget {
+        guard imageAtSelection() == nil else { return .none }
+        return Self.lengthTarget(in: cachedText, at: cachedSelection.location)
+    }
+
+    /// Avisa por qué no se abre la sesión. Devuelve el párrafo si se puede.
+    private func lengthParagraph(_ target: LengthTarget, noParagraph: String) -> (text: String, range: NSRange)? {
+        switch target {
+        case .prose(let range):
+            return ((cachedText as NSString).substring(with: range), range)
+        case .refused(let reason):
+            message = reason
+            lengthToast = reason
+            lengthToastCanUndo = false
+            return nil
+        case .none:
+            message = noParagraph
+            return nil
+        }
     }
 
     private func tryStartLengthSession(span: Double) async {
         guard !lengthRequiresRelease, span.isFinite else { return }
-        guard let (text, range) = paragraphForLength() else {
-            message = "Coloca el cursor en un párrafo y muestra las dos manos."
+        let target = paragraphForLength()
+        guard let (text, range) = lengthParagraph(target, noParagraph: "Coloca el cursor en un párrafo y muestra las dos manos.") else {
+            // Un párrafo rechazado no se reintenta en cada frame.
+            if case .refused = target { lengthRequiresRelease = true }
             return
         }
         guard lengthProvider.isAvailable else {
@@ -167,54 +212,91 @@ extension GestureModule {
         navigationX = nil
         lengthToast = nil
         // Reuso instantáneo: el mismo párrafo no regenera.
-        if let cached = lengthCache[text], cached.count == 2,
-           GestureSynonyms.isValidShort(cached[0], original: text),
-           GestureSynonyms.isValidLong(cached[1], original: text) {
-            lengthSession?.alternatives = [cached[0], text, cached[1]]
+        if let cached = lengthCache[text], applyLengthPair(cached, text: text) {
             lengthLoading = false
-            message = "Versiones listas (reusadas). Acerca para acortar, separa para ampliar. Retira una mano para confirmar."
+            message = "\(lengthReadyMessage) (reusadas)"
             return
         }
         lengthLoading = true
         message = "Preparando versiones corta y larga… Puedes quedarte en medio mientras tanto."
-        fetchLengthVariants(sessionId: lengthSession!.id, text: text)
+        fetchLengthVariants(text: text)
     }
 
-    private func fetchLengthVariants(sessionId: UUID, text: String) {
-        lengthTask?.cancel()
-        lengthTask = Task { [weak self] in
-            guard let self else { return }
-            let variants = await lengthProvider.variants(for: text)
-            await applyLengthVariants(variants, sessionId: sessionId)
-        }
-    }
-
-    private func applyLengthVariants(_ variants: [String], sessionId: UUID) async {
-        guard var s = lengthSession, s.id == sessionId else { return }
-        guard variants.count == 2,
-              GestureSynonyms.isValidShort(variants[0], original: s.originalText),
-              GestureSynonyms.isValidLong(variants[1], original: s.originalText) else {
-            await cancelLengthSession(reason: "no se pudieron crear versiones útiles; prueba con otro párrafo")
-            lengthToast = "No se pudieron crear versiones útiles. Prueba con otro párrafo."
-            lengthToastCanUndo = false
-            return
-        }
-        s.alternatives = [variants[0], s.originalText, variants[1]]
-        // Guarda para reuso: reabrir el mismo párrafo es instantáneo.
-        lengthCache[s.originalText] = [variants[0], variants[1]]
-        if lengthCache.count > 30 {
-            lengthCache.removeValue(forKey: lengthCache.keys.first ?? "")
-        }
-        // Si el usuario ya se movió a un extremo mientras cargaba, conserva
-        // su posición y previsualízala; si no, queda en medio.
-        let keptIndex = s.currentIndex
+    /// Pone en la sesión las versiones válidas. Las que faltan quedan
+    /// bloqueadas con su motivo: el original solo ocupa su hueco, nunca se
+    /// ofrece como si fuera una versión generada.
+    @discardableResult
+    private func applyLengthPair(_ pair: VariantPair, text: String) -> Bool {
+        let pair = GestureSynonyms.validLengthPair(pair.first ?? "", pair.second ?? "", original: text)
+        guard !pair.isEmpty, var s = lengthSession, s.originalText == text else { return false }
+        s.alternatives = [pair.first ?? text, text, pair.second ?? text]
+        s.unavailable = [:]
+        if pair.first == nil { s.unavailable[LengthLevel.corto.rawValue] = "La IA no dio una versión corta válida para este párrafo." }
+        if pair.second == nil { s.unavailable[LengthLevel.largo.rawValue] = "La IA no dio una versión larga válida para este párrafo." }
         lengthSession = s
-        lengthLoading = false
-        if keptIndex != LengthLevel.medio.rawValue {
-            lengthSession?.currentIndex = keptIndex
-            await send(.showPreview(s.alternatives[keptIndex]))
+        return true
+    }
+
+    private var lengthReadyMessage: String {
+        let how = lengthManualControl
+            ? "Compara y confirma."
+            : "Acerca para acortar, separa para ampliar. Retira una mano para confirmar."
+        guard let missing = lengthSession?.unavailable.keys.min(),
+              let level = LengthLevel(rawValue: missing) else { return "Versiones listas. \(how)" }
+        return "Versión \(level.label) no disponible: la IA no dio una válida. \(how)"
+    }
+
+    /// La generación sigue aunque la sesión cierre: el resultado queda en
+    /// caché y reabrir el mismo párrafo se une a ella en vez de reiniciarla.
+    private func fetchLengthVariants(text: String) {
+        guard lengthJob?.key != text else { return }
+        lengthJob?.task.cancel()
+        let id = UUID()
+        lengthJob = ModelJob(key: text, id: id, task: Task { [weak self] in
+            guard let self else { return }
+            let result: Result<VariantPair, ModelFailure>
+            do {
+                result = .success(try await lengthProvider.variants(for: text))
+            } catch {
+                // Cancelada porque otra generación la reemplazó: no es un fallo.
+                guard let failure = ModelFailure.classify(error) else { return }
+                result = .failure(failure)
+            }
+            await applyLengthVariants(result, text: text, id: id)
+        })
+    }
+
+    private func applyLengthVariants(_ result: Result<VariantPair, ModelFailure>, text: String, id: UUID) async {
+        // Guarda para reuso, también si solo una versión es válida: reabrir
+        // el mismo párrafo es instantáneo. Los fallos no se guardan para poder reintentar.
+        if case .success(let pair) = result {
+            let valid = GestureSynonyms.validLengthPair(pair.first ?? "", pair.second ?? "", original: text)
+            if !valid.isEmpty {
+                lengthCache[text] = valid
+                if lengthCache.count > 30 {
+                    lengthCache.removeValue(forKey: lengthCache.keys.first ?? "")
+                }
+            }
         }
-        message = "Versiones listas. Acerca para acortar, separa para ampliar. Retira una mano para confirmar."
+        guard lengthJob?.id == id else { return }
+        lengthJob = nil
+        guard let s = lengthSession, s.originalText == text, lengthLoading else { return }
+        let failure: ModelFailure
+        switch result {
+        case .success(let pair):
+            if applyLengthPair(pair, text: text) {
+                lengthLoading = false
+                // Mientras cargaba solo se podía estar en medio: no hay preview que rehacer.
+                message = lengthReadyMessage
+                return
+            }
+            failure = .invalidOutput
+        case .failure(let cause):
+            failure = cause
+        }
+        await cancelLengthSession(reason: "no se pudieron crear versiones; \(failure.message)")
+        lengthToast = "No se pudieron crear versiones. \(failure.message)"
+        lengthToastCanUndo = false
     }
 
     private func updateLengthSession(span: Double) async {
@@ -228,6 +310,10 @@ extension GestureModule {
         // Mientras carga solo se puede volver al medio (original): los
         // extremos aún no existen y no se previsualiza texto a medias.
         if lengthLoading, out.index != LengthLevel.medio.rawValue { return }
+        if let reason = s.unavailable[out.index] {
+            message = "\(reason) Quédate en medio o ve al otro extremo."
+            return
+        }
         s.referenceSpan = out.reference
         if out.index != s.currentIndex {
             s.currentIndex = out.index
@@ -247,6 +333,10 @@ extension GestureModule {
 
     private func commitLengthSession() async {
         guard let s = lengthSession else { return }
+        if let reason = s.unavailable[s.currentIndex] {
+            message = reason
+            return
+        }
         if lengthLoading {
             // Confirmar el medio (original) no necesita esperar: no hay
             // cambio que generar. Otro nivel sí debe esperar.
@@ -256,8 +346,7 @@ extension GestureModule {
             }
         }
         lengthSession = nil
-        lengthTask?.cancel()
-        lengthTask = nil
+        lengthLoading = false
         lengthTrackingLostAt = nil
         lengthTwoHandHits = []
         lengthSmoothedSpan = nil
@@ -296,6 +385,10 @@ extension GestureModule {
         }
         guard s.alternatives.indices.contains(index) else { return }
         if lengthLoading, index != LengthLevel.medio.rawValue { return }
+        if let reason = s.unavailable[index] {
+            message = reason
+            return
+        }
         s.currentIndex = index
         lengthSession = s
         await send(.showPreview(s.option))
@@ -308,6 +401,10 @@ extension GestureModule {
     public func previewLengthOption(at index: Int) async {
         guard var s = lengthSession, s.alternatives.indices.contains(index) else { return }
         if lengthLoading, index != LengthLevel.medio.rawValue { return }
+        if let reason = s.unavailable[index] {
+            message = reason
+            return
+        }
         guard index != s.currentIndex else { return }
         s.currentIndex = index
         lengthSession = s
@@ -323,8 +420,6 @@ extension GestureModule {
 
     func cancelLengthSession(reason: String) async {
         lengthSession = nil
-        lengthTask?.cancel()
-        lengthTask = nil
         lengthLoading = false
         lengthTrackingLostAt = nil
         lengthOpenStreak = 0
@@ -343,8 +438,6 @@ extension GestureModule {
     public func cancelLengthSession() {
         if lengthSession != nil {
             lengthSession = nil
-            lengthTask?.cancel()
-            lengthTask = nil
             lengthLoading = false
             lengthTrackingLostAt = nil
             lengthOpenStreak = 0
@@ -366,10 +459,7 @@ extension GestureModule {
             message = "Ya hay una sesión de gesto activa."
             return
         }
-        guard let (text, range) = paragraphForLength() else {
-            message = "Coloca el cursor en un párrafo primero."
-            return
-        }
+        guard let (text, range) = lengthParagraph(paragraphForLength(), noParagraph: "Coloca el cursor en un párrafo primero.") else { return }
         guard lengthProvider.isAvailable else {
             message = "No se puede cambiar la longitud. \(lengthProvider.availabilityReason ?? "Modelo de IA no disponible.")"
             lengthToast = message
@@ -387,17 +477,14 @@ extension GestureModule {
         lengthSmoothedSpan = nil
         lengthToast = nil
         navigationX = nil
-        if let cached = lengthCache[text], cached.count == 2,
-           GestureSynonyms.isValidShort(cached[0], original: text),
-           GestureSynonyms.isValidLong(cached[1], original: text) {
-            lengthSession?.alternatives = [cached[0], text, cached[1]]
+        if let cached = lengthCache[text], applyLengthPair(cached, text: text) {
             lengthLoading = false
-            message = "Versiones listas (reusadas). Compara y confirma."
+            message = "\(lengthReadyMessage) (reusadas)"
             return
         }
         lengthLoading = true
         message = "Preparando versiones corta y larga… Puedes ver tu texto en medio mientras tanto."
-        fetchLengthVariants(sessionId: lengthSession!.id, text: text)
+        fetchLengthVariants(text: text)
     }
 
     /// Cierra el aviso de longitud confirmada (sin tocar el texto).

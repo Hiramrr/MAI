@@ -1,3 +1,4 @@
+import EditorCore
 import Foundation
 import FoundationModels
 
@@ -11,10 +12,16 @@ public protocol SynonymProvider: Sendable {
     var isAvailable: Bool { get }
     /// Motivo legible si no está disponible (nil si lo está).
     var availabilityReason: String? { get }
-    /// Sinónimos frescos (máximo 3 útiles) o vacío si no hay mejora.
-    /// Nunca lanza: ante cualquier fallo devuelve vacío y el módulo
-    /// conserva la lista local.
-    func synonyms(for word: String) async -> [String]
+    /// Sinónimos frescos (máximo 3 útiles). Lanza `ModelFailure` con la
+    /// causa, o `CancellationError` si se canceló; el módulo conserva la
+    /// lista local y explica por qué no mejoró.
+    func synonyms(for word: String) async throws -> [String]
+    /// Prepara el modelo antes de usarlo (sin efecto si no hay modelo).
+    func prewarm()
+}
+
+extension SynonymProvider {
+    public func prewarm() {}
 }
 
 /// Lista local inmediata. Siempre disponible como base, pero nunca mejora:
@@ -30,7 +37,7 @@ public struct LocalSynonymProvider: SynonymProvider {
 }
 
 /// Sinónimos reales con Apple Foundation Models (on-device).
-/// Sin modelo disponible devuelve vacío: el módulo conserva los locales.
+/// Sin modelo disponible lanza `.unavailable`: el módulo conserva los locales.
 public struct FoundationModelsSynonymProvider: SynonymProvider {
     private static let instructions = "Eres un asistente de escritura en español. Respondes solo con el resultado pedido, sin preámbulos."
 
@@ -58,22 +65,27 @@ public struct FoundationModelsSynonymProvider: SynonymProvider {
         }
     }
 
-    public func synonyms(for word: String) async -> [String] {
-        let clean = word.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty, isAvailable else { return [] }
-        // Un intento + un reintento ante fallos transitorios.
-        if let top = await attempt(clean) { return top }
-        try? await Task.sleep(for: .milliseconds(600))
-        guard !Task.isCancelled else { return [] }
-        return await attempt(clean) ?? []
+    /// Carga el modelo antes de la primera petición; las tres funciones de
+    /// gestos comparten el mismo modelo del sistema.
+    public func prewarm() {
+        guard isAvailable else { return }
+        LanguageModelSession(instructions: Self.instructions).prewarm()
     }
 
-    private func attempt(_ clean: String) async -> [String]? {
-        guard !Task.isCancelled else { return nil }
-        let session = LanguageModelSession(instructions: Self.instructions)
+    /// Un solo intento con plazo: un reintento duplicaba la espera máxima y
+    /// la lista local ya está a la vista mientras tanto.
+    public func synonyms(for word: String) async throws -> [String] {
+        let clean = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { throw ModelFailure.invalidOutput }
+        guard isAvailable else {
+            throw ModelFailure.unavailable(availabilityReason ?? "Modelo de IA no disponible ahora mismo.")
+        }
+        try Task.checkCancellation()
+        let candidates: [String]
         do {
-            let response = try await withResponseTimeout(seconds: 15) {
-                try await session.respond(
+            candidates = try await withModelDeadline(.seconds(15)) {
+                let session = LanguageModelSession(instructions: Self.instructions)
+                let response = try await session.respond(
                     to: """
                     Dame exactamente 3 sinónimos breves para la palabra "\(clean)".
                     Responde SIEMPRE en el mismo idioma de la palabra (español por defecto).
@@ -82,37 +94,23 @@ public struct FoundationModelsSynonymProvider: SynonymProvider {
                     """,
                     generating: SynonymList.self
                 )
+                return response.content.synonyms
             }
-            // Solo sustitutos reales: distintos, breves y sin duplicados.
-            let maxWords = clean.split(separator: " ").count + 1
-            var seen = Set<String>()
-            let alts = response.content.synonyms
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty && $0.lowercased() != clean.lowercased() }
-                .filter { $0.split(separator: " ").count <= maxWords }
-                .filter { seen.insert($0.lowercased()).inserted }
-            let top = Array(alts.prefix(3))
-            return top.isEmpty ? nil : top
         } catch {
-            return nil
+            guard let failure = ModelFailure.classify(error) else { throw error }
+            aiLogger.error("Sinónimos sin resultado: \(String(describing: error), privacy: .private)")
+            throw failure
         }
-    }
-
-    private struct TimeoutError: Error {}
-
-    /// Tope de tiempo: si el modelo se queda colgado, se falla rápido en vez
-    /// de dejar la tarjeta esperando para siempre.
-    private func withResponseTimeout<T: Sendable>(seconds: Double, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await operation() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(seconds))
-                throw TimeoutError()
-            }
-            guard let result = try await group.next() else { throw TimeoutError() }
-            group.cancelAll()
-            return result
-        }
+        // Solo sustitutos reales: distintos, breves y sin duplicados.
+        let maxWords = clean.split(separator: " ").count + 1
+        var seen = Set<String>()
+        let alts = candidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.lowercased() != clean.lowercased() }
+            .filter { $0.split(separator: " ").count <= maxWords }
+            .filter { seen.insert($0.lowercased()).inserted }
+        guard !alts.isEmpty else { throw ModelFailure.invalidOutput }
+        return Array(alts.prefix(3))
     }
 }
 

@@ -20,7 +20,7 @@ public struct GestureControl: View {
         }
         .help("Gestos con la cámara")
         .accessibilityLabel("Gestos con la cámara")
-        .accessibilityHint("Activa la cámara para elegir palabras con la mano y usar la pinza.")
+        .accessibilityHint("Activa la cámara para elegir palabras, oraciones o párrafos con la mano y usar la pinza.")
         .popover(isPresented: $showPanel, arrowEdge: .bottom) {
             GesturePanel(module: module)
         }
@@ -143,13 +143,20 @@ public struct GesturePanel: View {
             .frame(width: 320, height: 180)
             .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            Text("Señala el texto para elegir una palabra o un párrafo. En modo palabras, la pinza muestra sinónimos y el barrido lateral deshace o rehace. En modo párrafos, mantén la pinza, mueve el párrafo y suelta. Dos manos cambian la longitud o el tamaño de una imagen.")
+            Picker("Señalar", selection: $module.navigationUnit) {
+                ForEach(GestureUnit.allCases, id: \.self) { unit in
+                    Text(unit.title).tag(unit)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .accessibilityLabel("Qué señala el dedo")
+            .help("Lo que selecciona el dedo y sobre lo que actúa la pinza")
+
+            Text(unitDescription)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-
-            Toggle("Elegir párrafos en vez de palabras", isOn: $module.navigateByParagraph)
-                .font(.callout)
-                .help("Señala un párrafo para seleccionarlo; mantén la pinza para moverlo")
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(module.message)
                 .font(.caption)
@@ -200,6 +207,16 @@ public struct GesturePanel: View {
         .frame(width: 352)
     }
 
+    /// Qué hace la pinza con la unidad elegida; el gesto a dos manos es común.
+    private var unitDescription: String {
+        let pinch = switch module.navigationUnit {
+        case .palabra: "Pinza sobre una palabra: sinónimos; mueve para elegir y suelta. Pinza con barrido lateral: deshacer o rehacer."
+        case .oracion: "Pinza sobre una oración: tono; izquierda enfría, derecha templa, suelta para confirmar."
+        case .parrafo: "Pinza sobre un párrafo: mantén, muévelo y suelta para reordenar."
+        }
+        return pinch + " Dos manos: longitud del párrafo o tamaño de una imagen."
+    }
+
     /// Pruebas sin cámara: siempre visibles, con cámara o sin ella.
     /// Abren las mismas tarjetas que los gestos (clic confirma, ✕ cancela).
     private var manualTests: some View {
@@ -216,6 +233,13 @@ public struct GesturePanel: View {
                 .controlSize(.small)
                 .disabled(module.hasLengthSession || module.hasPinchSession || module.hasImageSizeSession)
                 .help("Abre la tarjeta de sinónimos sobre la palabra actual")
+                Button("Tono") {
+                    Task { await module.startToneSessionManually() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(module.hasLengthSession || module.hasPinchSession || module.hasImageSizeSession)
+                .help("Abre frío/original/cálido sobre la oración actual")
                 Button("Longitud") {
                     Task { await module.startLengthSessionManually() }
                 }
@@ -273,6 +297,8 @@ public struct GesturePanel: View {
             "Imagen: acerca ↔ separa"
         } else if module.isDraggingParagraph {
             "Párrafo: mueve y suelta"
+        } else if module.isToneSession {
+            "Tono: frío ↔ cálido"
         } else if module.hasPinchSession {
             "Pinza: mueve ↔"
         } else if module.isPointingAtImage {
@@ -284,7 +310,7 @@ public struct GesturePanel: View {
         } else if module.state.pinch {
             "Pinza: mueve ↔"
         } else {
-            module.navigateByParagraph ? "Señala un párrafo" : "Señala una palabra"
+            module.navigationUnit.pointHint
         }
         return Group {
             if !text.isEmpty {

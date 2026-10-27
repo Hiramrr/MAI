@@ -15,6 +15,12 @@ struct PinchSession: Sendable {
     var alternatives: [String]
     var currentIndex: Int
     var referenceX: Double
+    /// Sesión de tono: `word` es la oración completa y las alternativas son
+    /// fijas, [fría, original, cálida].
+    var isTone = false
+    /// Niveles de tono sin versión válida, con su motivo. No se pueden
+    /// previsualizar ni confirmar.
+    var unavailable: [Int: String] = [:]
 
     var option: String { alternatives[currentIndex] }
 }
@@ -33,8 +39,29 @@ struct LengthSession: Sendable {
     var alternatives: [String]
     var currentIndex: Int
     var referenceSpan: Double
+    /// Niveles sin versión válida, con su motivo. No se pueden previsualizar
+    /// ni confirmar; su hueco en `alternatives` guarda el original.
+    var unavailable: [Int: String] = [:]
 
     var option: String { alternatives[currentIndex] }
+}
+
+/// Qué párrafo admite el cambio de longitud.
+enum LengthTarget: Equatable {
+    /// Rango UTF-16 del texto de prosa (sin marcas de cita o lista).
+    case prose(NSRange)
+    /// Hay algo bajo el cursor, pero no es prosa; lleva la explicación.
+    case refused(String)
+    /// No hay párrafo bajo el cursor.
+    case none
+}
+
+/// Generación con IA en curso. `key` es el texto que genera; `id` distingue
+/// la tarea vigente de una reemplazada que genera el mismo texto.
+struct ModelJob {
+    let key: String
+    let id: UUID
+    let task: Task<Void, Never>
 }
 
 struct ImageSizeSession {
@@ -52,10 +79,12 @@ struct ImageSizeSession {
 
 /// Entrada por gestos con la cámara local, como pieza extraíble.
 ///
-/// - El índice señala y selecciona la palabra o el párrafo bajo el cursor.
+/// - El índice señala y selecciona la palabra, la oración o el párrafo bajo el cursor.
 /// - Pinza sobre una palabra → muestra sinónimos locales; mover elige, soltar confirma.
+/// - En modo oración, la pinza cambia el tono (frío ↔ cálido, generado en el Mac);
+///   mover elige, soltar confirma.
 /// - En modo párrafo, la pinza toma el párrafo; mover y soltar lo reordena.
-/// - Abrir la pinza o perder la mano → cancela y restaura la palabra.
+/// - Perder la mano → cancela y restaura el texto.
 /// - Pinza + barrido lateral amplio → deshacer/rehacer (una vez por pinza).
 /// - Dos manos + acercar/separar → cambia la longitud del párrafo
 ///   (corto/medio/largo generados en el Mac); retirar UNA mano confirma, perder AMBAS
@@ -85,13 +114,24 @@ public final class GestureModule: EditorInputModule {
     public private(set) var paused = false
     public var message = "Cámara apagada"
     public var state = GestureState()
-    public var navigateByParagraph = UserDefaults.standard.bool(forKey: "editor.gestureParagraphNavigation") {
+    /// Qué señala el índice: palabras, oraciones o párrafos.
+    public var navigationUnit = GestureUnit.stored {
         didSet {
             navigationX = nil
             if paragraphDragSource != nil { requiresRelease = true }
             paragraphDragSource = nil
             paragraphDropTarget = nil
-            UserDefaults.standard.set(navigateByParagraph, forKey: "editor.gestureParagraphNavigation")
+            UserDefaults.standard.set(navigationUnit.rawValue, forKey: GestureUnit.key)
+        }
+    }
+    public var navigateByParagraph: Bool {
+        get { navigationUnit == .parrafo }
+        set {
+            if newValue {
+                navigationUnit = .parrafo
+            } else if navigationUnit == .parrafo {
+                navigationUnit = .palabra
+            }
         }
     }
 
@@ -105,6 +145,7 @@ public final class GestureModule: EditorInputModule {
     /// con fallback local; en pruebas se inyecta un doble sin modelo.
     let synonymProvider: any SynonymProvider
     let lengthProvider: any LengthProvider
+    let toneProvider: any ToneProvider
 
     // @Observable no admite `lazy`: inicialización explícita a demanda.
     // La cámara solo existe si el usuario la activa: sin la pieza (o sin
@@ -130,6 +171,8 @@ public final class GestureModule: EditorInputModule {
     private var cachedWordRanges: [NSRange] = []
     private var paragraphText = ""
     private var cachedParagraphRanges: [NSRange] = []
+    private var sentenceText = ""
+    private var cachedSentenceRanges: [NSRange] = []
     var navigationX: Double?
     var paragraphDragSource: NSRange?
     var paragraphDropTarget: NSRange?
@@ -158,7 +201,9 @@ public final class GestureModule: EditorInputModule {
     public internal(set) var sessionDelta = 0.0
     /// La lista actual ya incluye sinónimos de IA (si no, locales).
     public internal(set) var sessionUpgraded = false
-    var upgradeTask: Task<Void, Never>?
+    /// Por qué la IA no mejoró la lista de la sesión actual (nil si no falló).
+    public internal(set) var synonymNotice: String?
+    var upgradeJob: ModelJob?
     /// Caché de sinónimos de IA por palabra (minúsculas): reabrir la misma
     /// palabra reusa al instante sin regenerar con el modelo.
     /// Solo se guardan respuestas no vacías; los fallos no se cachean
@@ -167,6 +212,13 @@ public final class GestureModule: EditorInputModule {
     /// Estado de la IA para la UI (panel y ajustes).
     public var synonymProviderAvailable: Bool { synonymProvider.isAvailable }
     public var synonymProviderReason: String? { synonymProvider.availabilityReason }
+
+    /// Sesión de tono: generando las versiones fría y cálida.
+    public internal(set) var toneLoading = false
+    var toneJob: ModelJob?
+    /// Caché de tonos por oración original; valor: (fría, cálida), con nil
+    /// en la que no salió válida.
+    var toneCache: [String: VariantPair] = [:]
 
     /// Sesión iniciada desde un botón (sin cámara): solo la tarjeta la mueve.
     var pinchManualControl = false
@@ -193,12 +245,13 @@ public final class GestureModule: EditorInputModule {
     public var hasImageSizeSession: Bool { imageSizeSession != nil }
     public var imageWidth: Int { imageSizeSession?.width ?? 0 }
     public var isImageSizeManual: Bool { imageManualControl }
-    var lengthTask: Task<Void, Never>?
+    var lengthJob: ModelJob?
     public internal(set) var lengthLoading = false
     /// Caché de variantes por párrafo original: reabrir el mismo párrafo
     /// (p. ej. tras Deshacer) no regenera con la IA, reusa al instante.
-    /// Clave: texto original; valor: [corta, larga].
-    var lengthCache: [String: [String]] = [:]
+    /// Clave: texto original; valor: (corta, larga), con nil en la que no
+    /// salió válida.
+    var lengthCache: [String: VariantPair] = [:]
     var lengthLastSpan = 0.0
     /// Separación suavizada (media móvil exponencial). Congelada durante
     /// pérdidas de seguimiento: al volver, el re-anclaje excluye el salto.
@@ -219,8 +272,13 @@ public final class GestureModule: EditorInputModule {
     /// Lecturas para la tarjeta de longitud (observadas por SwiftUI).
     public var hasLengthSession: Bool { lengthSession != nil }
     public var lengthOptions: [String] {
-        guard let options = lengthSession?.alternatives else { return [] }
-        return lengthLoading ? ["Preparando versión corta…", options[1], "Preparando versión larga…"] : options
+        guard let s = lengthSession else { return [] }
+        if lengthLoading { return ["Preparando versión corta…", s.alternatives[1], "Preparando versión larga…"] }
+        return s.alternatives.indices.map { s.unavailable[$0] ?? s.alternatives[$0] }
+    }
+    /// Motivo por el que un nivel no se puede usar (nil si se puede).
+    public func lengthUnavailableReason(at index: Int) -> String? {
+        lengthSession?.unavailable[index]
     }
     public var lengthIndex: Int { lengthSession?.currentIndex ?? LengthLevel.medio.rawValue }
     public var lengthLabels: [String] { LengthLevel.allCases.map(\.label) }
@@ -233,10 +291,12 @@ public final class GestureModule: EditorInputModule {
     public internal(set) var lengthToastCanUndo = true
 
     public init(synonymProvider: (any SynonymProvider)? = nil,
-                lengthProvider: (any LengthProvider)? = nil) {
+                lengthProvider: (any LengthProvider)? = nil,
+                toneProvider: (any ToneProvider)? = nil) {
         // Sin inyección (producción): IA on-device si hay modelo, locales si no.
         self.synonymProvider = synonymProvider ?? FoundationModelsSynonymProvider()
         self.lengthProvider = lengthProvider ?? FoundationModelsLengthProvider()
+        self.toneProvider = toneProvider ?? FoundationModelsToneProvider()
     }
 
     // MARK: - EditorInputModule
@@ -286,6 +346,23 @@ public final class GestureModule: EditorInputModule {
             navigationX = nil
         }
         return cachedParagraphRanges
+    }
+
+    func currentSentenceRanges() -> [NSRange] {
+        if cachedText != sentenceText {
+            sentenceText = cachedText
+            cachedSentenceRanges = GestureSentences.ranges(in: cachedText)
+            navigationX = nil
+        }
+        return cachedSentenceRanges
+    }
+
+    func currentNavigationRanges() -> [NSRange] {
+        switch navigationUnit {
+        case .palabra: currentWordRanges()
+        case .oracion: currentSentenceRanges()
+        case .parrafo: currentParagraphRanges()
+        }
     }
 
     private static func wordRanges(in text: String) -> [NSRange] {
@@ -350,9 +427,10 @@ public final class GestureModule: EditorInputModule {
             navigationX = nil
             trackingLostAt = nil
             lastRawPinch = false
-            message = navigateByParagraph
-                ? "Señala un párrafo y usa la pinza para moverlo."
-                : "Señala una palabra; la pinza muestra sinónimos."
+            message = navigationUnit.startMessage
+            // Con la cámara encendida es probable pedir sinónimos, tono o
+            // longitud: cargar el modelo ahora acorta la primera respuesta.
+            synonymProvider.prewarm()
             // Un único consumidor del AsyncStream durante toda la vida del
             // objeto: crearlo por arranque dividía la entrega de frames.
             ensureConsumer()

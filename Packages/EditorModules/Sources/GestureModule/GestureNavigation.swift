@@ -1,5 +1,54 @@
 import Foundation
 
+/// Unidad que señala el índice. Cada una tiene su gesto de pinza:
+/// sinónimos (palabra), tono (oración) y mover (párrafo).
+public enum GestureUnit: String, CaseIterable, Sendable {
+    case palabra, oracion, parrafo
+
+    static let key = "editor.gestureNavigationUnit"
+
+    /// Preferencia guardada. Sin ella se respeta el interruptor anterior
+    /// (palabras o párrafos).
+    static var stored: GestureUnit {
+        let defaults = UserDefaults.standard
+        if let unit = defaults.string(forKey: key).flatMap(GestureUnit.init) { return unit }
+        return defaults.bool(forKey: "editor.gestureParagraphNavigation") ? .parrafo : .palabra
+    }
+
+    public var title: String {
+        switch self {
+        case .palabra: "Palabras"
+        case .oracion: "Oraciones"
+        case .parrafo: "Párrafos"
+        }
+    }
+
+    public var pointHint: String {
+        switch self {
+        case .palabra: "Señala una palabra"
+        case .oracion: "Señala una oración"
+        case .parrafo: "Señala un párrafo"
+        }
+    }
+
+    var startMessage: String {
+        switch self {
+        case .palabra: "Señala una palabra; la pinza muestra sinónimos."
+        case .oracion: "Señala una oración; la pinza cambia su tono."
+        case .parrafo: "Señala un párrafo y usa la pinza para moverlo."
+        }
+    }
+
+    /// Paso horizontal al caminar la selección sin cursor sobre el texto.
+    var step: Double {
+        switch self {
+        case .palabra: GestureTuning.wordStep
+        case .oracion: GestureTuning.sentenceStep
+        case .parrafo: GestureTuning.paragraphStep
+        }
+    }
+}
+
 /// Navegación palabra por palabra con la mano abierta.
 /// Lógica pura (testeable). Portada de EditorTDAH.
 ///
@@ -39,22 +88,24 @@ public struct WordNavigator: Sendable {
 }
 
 /// Avance de opción dentro de la sesión de pinza (lógica pura, testeable).
-/// Cada `optionStep` de desplazamiento horizontal mueve una opción;
-/// en los bordes se queda en el extremo y re-ancla con el dedo.
+/// Cada `optionStep` de desplazamiento horizontal mueve una opción
+/// (`toneStep` en la sesión de tono); en los bordes se queda en el extremo
+/// y re-ancla con el dedo.
 public struct PinchStep: Sendable {
     public static var threshold: Double { GestureTuning.optionStep }
 
     public init() {}
 
     /// - Returns: `(índice, nueva referencia)` o `nil` si no hay que moverse.
-    public static func advance(current: Int, count: Int, delta: Double, reference: Double) -> (index: Int, reference: Double)? {
-        guard count > 0 else { return nil }
-        let steps = Int(delta / threshold)
+    public static func advance(current: Int, count: Int, delta: Double, reference: Double,
+                               step: Double = threshold) -> (index: Int, reference: Double)? {
+        guard count > 0, step > 0 else { return nil }
+        let steps = Int(delta / step)
         guard steps != 0 else { return nil }
         let requested = current + steps
         let next = min(count - 1, max(0, requested))
         let newReference = requested == next
-            ? reference + Double(steps) * threshold
+            ? reference + Double(steps) * step
             : reference + delta
         return (next, newReference)
     }

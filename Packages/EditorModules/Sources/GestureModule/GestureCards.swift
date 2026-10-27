@@ -37,7 +37,9 @@ public struct GestureCards: View {
 
     public var body: some View {
         VStack(spacing: 10) {
-            if module.hasPinchSession {
+            if module.isToneSession {
+                ToneOptionsCard(module: module)
+            } else if module.hasPinchSession {
                 PinchOptionsCard(module: module)
             }
             if module.hasLengthSession {
@@ -156,9 +158,11 @@ struct PinchOptionsCard: View {
             }
 
             HStack {
-                Text(module.sessionUpgraded ? "Sugerencias de IA" : "Sugerencias locales…")
+                Text(module.sessionUpgraded ? "Sugerencias de IA"
+                     : module.synonymNotice.map { "Sugerencias locales · \($0)" } ?? "Sugerencias locales…")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .lineLimit(3)
                 Spacer()
                 Text(module.isPinchManual ? "Clic para confirmar" : "Suelta para confirmar · abre para cancelar")
                     .font(.caption2)
@@ -193,6 +197,133 @@ struct PinchOptionsCard: View {
                 .foregroundStyle(.blue)
                 .opacity(rightStrength)
         }
+    }
+}
+
+/// Tono de la oración mientras la pinza está activa: izquierda enfría,
+/// derecha templa y el documento previsualiza cada nivel. Clic en un nivel
+/// lo confirma; ✕ cancela.
+struct ToneOptionsCard: View {
+    @Bindable var module: GestureModule
+
+    private static let tints: [Color] = [.blue, .secondary, .orange]
+
+    var body: some View {
+        let options = module.toneOptions
+        let labels = module.toneLabels
+        let current = module.sessionIndex
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "thermometer.medium")
+                    .font(.caption)
+                    .foregroundStyle(tint(current))
+                Text(module.isPinchManual ? "Tono · prueba" : "Tono · pinza")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text(labels.indices.contains(current) ? labels[current] : "")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    module.cancelPinchSession()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancelar y restaurar la oración")
+                .accessibilityLabel("Cancelar")
+            }
+
+            scale(current: current, count: options.count)
+
+            ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                let waiting = module.toneLoading && index != ToneLevel.original.rawValue
+                let missing = module.toneUnavailableReason(at: index)
+                Button {
+                    Task { await module.commitPinchSession(at: index) }
+                } label: {
+                    HStack(alignment: .top) {
+                        Text(index == ToneLevel.original.rawValue ? "tu texto"
+                             : labels.indices.contains(index) ? labels[index] : "")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(tint(index))
+                            .frame(width: 52, alignment: .leading)
+                        Text(option)
+                            .font(.system(size: 13))
+                            .fontWeight(index == current ? .semibold : .regular)
+                            .foregroundStyle(waiting || missing != nil ? .secondary : .primary)
+                            .lineLimit(4)
+                        Spacer()
+                        if index == current {
+                            Image(systemName: "checkmark")
+                                .font(.caption)
+                                .foregroundStyle(tint(index))
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        index == current
+                            ? tint(index).opacity(0.16)
+                            : Color(nsColor: .controlBackgroundColor).opacity(0.6),
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(waiting || missing != nil)
+                .help(waiting ? "Aún generando esta versión…" : missing ?? "Confirmar: \(option)")
+            }
+
+            HStack {
+                Text(module.toneLoading ? "Generando con Apple Intelligence…" : "Generadas en este Mac")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Text(module.isPinchManual ? "Clic para confirmar" : "Mueve ↔ · suelta para confirmar")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 420)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
+    }
+
+    private func tint(_ index: Int) -> Color {
+        Self.tints.indices.contains(index) ? Self.tints[index] : .secondary
+    }
+
+    /// Escala frío → cálido con la posición actual: la mano se mueve sobre
+    /// el mismo eje que se ve en pantalla.
+    private func scale(current: Int, count: Int) -> some View {
+        let fraction = count > 1 ? Double(current) / Double(count - 1) : 0.5
+        return HStack(spacing: 8) {
+            Image(systemName: "snowflake")
+                .font(.caption2)
+                .foregroundStyle(.blue)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(LinearGradient(colors: [.blue, .gray.opacity(0.5), .orange],
+                                             startPoint: .leading, endPoint: .trailing))
+                        .frame(height: 6)
+                    Circle()
+                        .fill(.white)
+                        .overlay(Circle().stroke(.black.opacity(0.35), lineWidth: 1))
+                        .frame(width: 14, height: 14)
+                        .offset(x: (geometry.size.width - 14) * fraction)
+                        .animation(.easeOut(duration: 0.15), value: current)
+                }
+                .frame(maxHeight: .infinity)
+            }
+            .frame(height: 14)
+            Image(systemName: "sun.max.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -235,10 +366,12 @@ struct LengthOptionsCard: View {
                     levelRow(index: index, text: option, labels: labels, current: current)
                 }
                 .buttonStyle(.plain)
-                .disabled(module.lengthLoading && index != LengthLevel.medio.rawValue)
+                .disabled(module.lengthLoading && index != LengthLevel.medio.rawValue
+                          || module.lengthUnavailableReason(at: index) != nil)
                 .help(index != LengthLevel.medio.rawValue && module.lengthLoading
                       ? "Aún generando esta versión…"
-                      : "\(index < labels.count ? labels[index].capitalized : "Versión") en vista previa: \(option)")
+                      : module.lengthUnavailableReason(at: index)
+                        ?? "\(index < labels.count ? labels[index].capitalized : "Versión") en vista previa: \(option)")
             }
 
             HStack(spacing: 8) {
@@ -285,6 +418,7 @@ struct LengthOptionsCard: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                 Text(module.lengthLoading && index != LengthLevel.medio.rawValue
+                     || module.lengthUnavailableReason(at: index) != nil
                      ? ""
                      : "\(text.split(whereSeparator: \.isWhitespace).count) pal.\(text == module.lengthOriginalText ? " · tu texto" : "")")
                     .font(.caption2)
@@ -295,6 +429,7 @@ struct LengthOptionsCard: View {
             Text(text)
                 .font(.system(size: 13))
                 .fontWeight(index == current ? .semibold : .regular)
+                .foregroundStyle(module.lengthUnavailableReason(at: index) != nil ? .secondary : .primary)
                 .lineLimit(6)
             Spacer()
             if index == current {

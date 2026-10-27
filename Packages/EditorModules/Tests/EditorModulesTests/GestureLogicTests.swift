@@ -165,3 +165,35 @@ final class GestureSynonymsTests: XCTestCase {
         XCTAssertTrue(GestureSynonyms.isValidShort("Primera oración completa.", original: paragraph))
     }
 }
+
+final class GestureToneTests: XCTestCase {
+    func testSentenceRangesSkipMarkdownMarks() {
+        let text = "# Título del texto\n\nPrimera oración. ¿Segunda oración?\n- Punto de lista.\n![foto](a.png)\n```\ncódigo aquí.\n```\n---"
+        let sentences = GestureSentences.ranges(in: text).map { (text as NSString).substring(with: $0) }
+        XCTAssertEqual(sentences, ["Título del texto", "Primera oración.", "¿Segunda oración?", "Punto de lista."])
+    }
+
+    func testToneStepIsWiderThanOptions() {
+        XCTAssertNil(PinchStep.advance(current: 1, count: 3, delta: GestureTuning.optionStep,
+                                       reference: 0.5, step: GestureTuning.toneStep))
+        let warm = PinchStep.advance(current: 1, count: 3, delta: GestureTuning.toneStep,
+                                     reference: 0.5, step: GestureTuning.toneStep)
+        XCTAssertEqual(warm?.index, ToneLevel.calido.rawValue)
+        let cold = PinchStep.advance(current: 1, count: 3, delta: -GestureTuning.toneStep,
+                                     reference: 0.5, step: GestureTuning.toneStep)
+        XCTAssertEqual(cold?.index, ToneLevel.frio.rawValue)
+    }
+
+    func testToneRejectsCopiesAndUnrelatedText() {
+        let sentence = "Necesito el informe mañana sin falta."
+        XCTAssertTrue(GestureTone.canRewrite(sentence))
+        XCTAssertFalse(GestureTone.canRewrite("Hola equipo."))
+        XCTAssertFalse(GestureTone.canRewrite("Lee [la guía](https://ejemplo.com) antes de empezar."))
+        XCTAssertTrue(GestureTone.isValid("Se requiere el informe mañana.", original: sentence))
+        XCTAssertFalse(GestureTone.isValid("necesito el informe mañana sin falta.", original: sentence))
+        XCTAssertFalse(GestureTone.isValid("Se requiere el informe…", original: sentence))
+        XCTAssertFalse(GestureTone.isValid("El clima estará soleado todo el fin de semana.", original: sentence))
+        XCTAssertFalse(GestureTone.areValid(["Se requiere el informe mañana.", "Se requiere el informe mañana."],
+                                            original: sentence))
+    }
+}

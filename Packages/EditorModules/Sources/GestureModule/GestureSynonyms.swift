@@ -180,6 +180,14 @@ public enum GestureSynonyms: Sendable {
             && keepsVocabulary(s, original: original)
     }
 
+    /// (corta, larga) validadas por separado: cada una queda si es válida.
+    public static func validLengthPair(_ short: String, _ long: String, original: String) -> VariantPair {
+        let short = short.trimmingCharacters(in: .whitespacesAndNewlines)
+        let long = long.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VariantPair(isValidShort(short, original: original) ? short : nil,
+                           isValidLong(long, original: original) ? long : nil)
+    }
+
     /// La larga debe aportar texto respecto al original: más palabras y más
     /// caracteres, con el vocabulario del original.
     public static func isValidLong(_ s: String, original: String) -> Bool {

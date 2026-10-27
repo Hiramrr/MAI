@@ -42,6 +42,10 @@ extension GestureModule {
             message = "Párrafo tomado. Muévelo y abre la pinza para soltarlo."
             return
         }
+        if navigationUnit == .oracion {
+            await tryStartToneSession(x: x, manual: false)
+            return
+        }
         guard let (word, range) = wordAtSelection() else {
             // Aviso una sola vez por pinza (al abrir la ventana de inicio).
             if pinchStreak == GestureTuning.pinchStartFrames {
@@ -82,6 +86,7 @@ extension GestureModule {
         sessionLastHandX = x
         sessionDelta = 0
         sessionUpgraded = cachedFresh != nil
+        synonymNotice = nil
         openStreak = 0
         if cachedFresh != nil {
             message = "Sinónimos listos (reusados). Mueve para elegir, suelta para confirmar."
@@ -90,12 +95,16 @@ extension GestureModule {
         message = starter.count > 1
             ? "Pinza: mueve para elegir, suelta para confirmar."
             : "Buscando sinónimos con IA… mantén la pinza."
-        fetchUpgrade(sessionId: pinchSession!.id, word: word)
+        fetchUpgrade(word: word)
     }
 
     func updateSession(_ vision: GestureState) async {
         guard var s = pinchSession, vision.event == .changed,
               let x = vision.x, x.isFinite else { return }
+        if s.isTone {
+            await updateToneSession(x: x)
+            return
+        }
         sessionLastHandX = x
         let delta = x - s.referenceX
         sessionDelta = delta
@@ -117,23 +126,48 @@ extension GestureModule {
 
     func commitSession() async {
         guard let s = pinchSession else { return }
+        // Un nivel sin versión válida nunca se confirma (no debería estar elegido).
+        if let reason = s.unavailable[s.currentIndex] {
+            message = reason
+            return
+        }
+        // El tono a medio generar no se cancela: termina y queda en caché.
+        let stillLoading = toneLoading
+        toneLoading = false
         pinchSession = nil
         pinchManualControl = false
         trackingLostAt = nil
         openStreak = 0
         sessionDelta = 0
-        upgradeTask?.cancel()
-        upgradeTask = nil
         // Tras confirmar hay que reabrir los dedos para otra sesión
         // (evita que un clic en la tarjeta reabra la pinza sostenida).
         requiresRelease = true
         await send(.commitPreview)
-        message = (s.option == s.word) ? "Sin cambios" : "Confirmado: \(s.option)"
+        guard s.isTone else {
+            message = (s.option == s.word) ? "Sin cambios" : "Confirmado: \(s.option)"
+            return
+        }
+        if s.option != s.word {
+            let level = ToneLevel(rawValue: s.currentIndex)?.label ?? ""
+            message = "Confirmado · tono \(level). ⌘Z para deshacer."
+            lengthToast = "Oración en tono \(level)"
+            lengthToastCanUndo = true
+        } else {
+            message = stillLoading
+                ? "Sin cambios: el tono aún se generaba. Vuelve a pinzar la oración."
+                : "Sin cambios"
+        }
     }
 
     /// Confirma directamente una opción de la tarjeta (clic).
     public func commitPinchSession(at index: Int) async {
         guard var s = pinchSession, s.alternatives.indices.contains(index) else { return }
+        // Los tonos a medio generar aún no existen: solo el original confirma.
+        if s.isTone, toneLoading, index != ToneLevel.original.rawValue { return }
+        if let reason = s.unavailable[index] {
+            message = reason
+            return
+        }
         s.currentIndex = index
         pinchSession = s
         await send(.showPreview(s.option))
@@ -142,12 +176,11 @@ extension GestureModule {
 
     func cancelSession(reason: String) async {
         pinchSession = nil
+        toneLoading = false
         pinchManualControl = false
         trackingLostAt = nil
         openStreak = 0
         sessionDelta = 0
-        upgradeTask?.cancel()
-        upgradeTask = nil
         requiresRelease = true
         await send(.cancelPreview)
         message = "Cancelado: \(reason). Abre los dedos antes de otro pinch."
@@ -158,12 +191,11 @@ extension GestureModule {
         if pinchSession != nil {
             let pinch = pinchSession
             pinchSession = nil
+            toneLoading = false
             pinchManualControl = false
             trackingLostAt = nil
             openStreak = 0
             sessionDelta = 0
-            upgradeTask?.cancel()
-            upgradeTask = nil
             requiresRelease = true
             Task { await send(.cancelPreview) }
             _ = pinch
@@ -208,6 +240,7 @@ extension GestureModule {
         sessionLastHandX = 0
         sessionDelta = 0
         sessionUpgraded = cachedFresh != nil
+        synonymNotice = nil
         openStreak = 0
         pinchStreak = 0
         pinchManualControl = true
@@ -218,25 +251,63 @@ extension GestureModule {
         message = starter.count > 1
             ? "Elige un sinónimo en la tarjeta para confirmar, o ✕ para cancelar."
             : "Buscando sinónimos con IA…"
-        fetchUpgrade(sessionId: pinchSession!.id, word: word)
+        fetchUpgrade(word: word)
     }
 
     /// Sinónimos reales (IA on-device) que mejoran la lista local si llegan
     /// a tiempo. Con caché no se llama al modelo. Sin modelo disponible
     /// el proveedor devuelve vacío y la tarjeta conserva los locales
     /// diciendo que son locales.
-    private func fetchUpgrade(sessionId: UUID, word: String) {
-        // La misma palabra no regenera: reusa al instante.
+    /// La generación sigue aunque la sesión cierre: el resultado queda en
+    /// caché y reabrir la misma palabra se une a ella en vez de reiniciarla.
+    private func fetchUpgrade(word: String) {
+        let key = synonymCacheKey(word)
         if let cached = cachedSynonyms(for: word), !cached.isEmpty {
             Task { [weak self] in
-                await self?.applyUpgrade(cached, sessionId: sessionId, word: word)
+                await self?.applyUpgrade(cached, word: word)
             }
             return
         }
-        upgradeTask?.cancel()
-        upgradeTask = Task { [weak self] in
-            let fresh = await self?.synonymProvider.synonyms(for: word) ?? []
-            await self?.applyUpgrade(fresh, sessionId: sessionId, word: word)
+        guard upgradeJob?.key != key else { return }
+        // Otra palabra: la anterior ya no se espera y deja libre el modelo.
+        upgradeJob?.task.cancel()
+        let id = UUID()
+        upgradeJob = ModelJob(key: key, id: id, task: Task { [weak self] in
+            guard let self else { return }
+            let result: Result<[String], ModelFailure>
+            do {
+                result = .success(try await synonymProvider.synonyms(for: word))
+            } catch {
+                // Cancelada porque otra palabra la reemplazó: no es un fallo.
+                guard let failure = ModelFailure.classify(error) else { return }
+                result = .failure(failure)
+            }
+            await finishUpgrade(result, word: word, id: id)
+        })
+    }
+
+    private func finishUpgrade(_ result: Result<[String], ModelFailure>, word: String, id: UUID) async {
+        if case .success(let fresh) = result { storeSynonyms(fresh, for: word) }
+        guard upgradeJob?.id == id else { return }
+        upgradeJob = nil
+        switch result {
+        case .success(let fresh):
+            await applyUpgrade(fresh, word: word)
+        case .failure(let failure):
+            await reportUpgradeFailure(failure, word: word)
+        }
+    }
+
+    /// La IA no mejoró la lista: se dice por qué. Con sinónimos locales la
+    /// sesión sigue; con la palabra sola no hay nada que elegir y se cierra.
+    private func reportUpgradeFailure(_ failure: ModelFailure, word: String) async {
+        guard let s = pinchSession, !s.isTone,
+              synonymCacheKey(s.word) == synonymCacheKey(word) else { return }
+        if s.alternatives.count <= 1 {
+            await cancelSession(reason: "sin sinónimos para “\(word)”. \(failure.message)")
+        } else {
+            synonymNotice = failure.message
+            message = "Sinónimos locales. \(failure.message)"
         }
     }
 
@@ -260,27 +331,31 @@ extension GestureModule {
     }
 
     /// Mejora con sinónimos frescos: se aplica aunque el usuario ya se
-    /// moviera (se conserva su elección si sigue en la lista). Si la sesión
-    /// ya cerró, se descarta en silencio. Si no llegó mejora y la lista era
-    /// solo la palabra, se cierra con mensaje (con la pinza aún cerrada el
-    /// `requiresRelease` evita que se reabra sola).
-    private func applyUpgrade(_ fresh: [String], sessionId: UUID, word: String) async {
-        guard var s = pinchSession, s.id == sessionId else { return }
+    /// moviera (se conserva su elección si sigue en la lista). Si no hay
+    /// sesión de esa palabra, se descarta en silencio (ya quedó en caché).
+    /// Si no llegó mejora y la lista era solo la palabra, se cierra con
+    /// mensaje (con la pinza aún cerrada el `requiresRelease` evita que se
+    /// reabra sola).
+    private func applyUpgrade(_ fresh: [String], word: String) async {
+        guard var s = pinchSession, !s.isTone,
+              synonymCacheKey(s.word) == synonymCacheKey(word) else { return }
         if fresh.isEmpty {
             if s.alternatives.count <= 1 {
                 await cancelSession(reason: "La IA no devolvió sinónimos para “\(word)”")
             }
             return
         }
-        storeSynonyms(fresh, for: word)
-        let merged = PinchStep.mergedOptions(word: word, fresh: fresh)
+        synonymNotice = nil
+        let merged = PinchStep.mergedOptions(word: s.word, fresh: fresh)
         guard merged != s.alternatives else { return }
         let currentOption = s.option
         s.alternatives = merged
         s.currentIndex = merged.firstIndex(of: currentOption) ?? 0
         pinchSession = s
         sessionUpgraded = true
-        Task { await send(.showPreview(s.option)) }
         message = "Sinónimos listos. Mueve para elegir, suelta para confirmar."
+        // En orden con el resto de comandos: un envío suelto podía llegar
+        // después de confirmar y pisar la preview de la siguiente sesión.
+        await send(.showPreview(s.option))
     }
 }

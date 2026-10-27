@@ -26,6 +26,11 @@ public enum GestureTuning: Sendable {
     public static let optionStep = 0.05
     /// Paso horizontal para caminar la selección palabra por palabra.
     public static let wordStep = 0.07
+    /// Paso horizontal entre niveles de tono (frío · original · cálido).
+    /// Más ancho que el de sinónimos: cada nivel reescribe la oración entera.
+    public static let toneStep = 0.08
+    /// Las oraciones requieren un movimiento intermedio entre palabra y párrafo.
+    public static let sentenceStep = 0.11
     /// Los párrafos requieren un movimiento más amplio que las palabras.
     public static let paragraphStep = 0.16
     /// Frames seguidos de pinza antes de abrir la sesión (evita roces).

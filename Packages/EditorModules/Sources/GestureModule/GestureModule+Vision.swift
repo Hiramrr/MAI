@@ -108,23 +108,24 @@ extension GestureModule {
     }
 
     private func updateFingerCursor(_ vision: GestureState) {
-        guard calibration == nil else {
-            cursorPoint = nil
-            pointedImageRange = imageHitTest?(nil)
-            return
-        }
-        cursorPoint = nil
-        pointedImageRange = nil
-        for hand in [vision.landmarks, vision.secondaryLandmarks].compactMap({ $0 }) where hand.isValid {
-            let point = CGPoint(x: 1 - hand.index.x, y: 1 - hand.index.y)
-            let hit = imageHitTest?(point)
-            if cursorPoint == nil || hit != nil {
-                cursorPoint = point
-                pointedImageRange = hit
+        // Se calcula en locales y se publica una vez: cada escritura en una
+        // propiedad observada repinta la interfaz, y esto corre en cada frame.
+        var point: CGPoint?
+        var range: NSRange?
+        if calibration == nil {
+            for hand in [vision.landmarks, vision.secondaryLandmarks].compactMap({ $0 }) where hand.isValid {
+                let candidate = CGPoint(x: 1 - hand.index.x, y: 1 - hand.index.y)
+                let hit = imageHitTest?(candidate)
+                if point == nil || hit != nil {
+                    point = candidate
+                    range = hit
+                }
+                if hit != nil { break }
             }
-            if hit != nil { return }
         }
-        if cursorPoint == nil { pointedImageRange = imageHitTest?(nil) }
+        if point == nil { range = imageHitTest?(nil) }
+        if cursorPoint != point { cursorPoint = point }
+        if pointedImageRange != range { pointedImageRange = range }
     }
 
     func rangeUnderCursor(_ ranges: [NSRange]) -> NSRange? {
@@ -204,7 +205,9 @@ extension GestureModule {
             s.referenceX += x - sessionLastHandX
             pinchSession = s
             sessionLastHandX = x
-            message = "Preview: \(s.option). Mueve para elegir, suelta para confirmar."
+            message = s.isTone
+                ? "Tono · \(ToneLevel(rawValue: s.currentIndex)?.label ?? ""). Mueve para elegir, suelta para confirmar."
+                : "Preview: \(s.option). Mueve para elegir, suelta para confirmar."
         }
     }
 
@@ -219,7 +222,7 @@ extension GestureModule {
             navigationX = nil
             return
         }
-        let ranges = navigateByParagraph ? currentParagraphRanges() : currentWordRanges()
+        let ranges = currentNavigationRanges()
         guard !ranges.isEmpty else {
             navigationX = nil
             return
@@ -236,7 +239,7 @@ extension GestureModule {
         guard let out = WordNavigator.update(
             ranges: ranges, selection: selection,
             referenceX: navigationX, handX: x,
-            step: navigateByParagraph ? GestureTuning.paragraphStep : GestureTuning.wordStep
+            step: navigationUnit.step
         ) else { return }
         navigationX = out.referenceX
         cachedSelection = out.select
