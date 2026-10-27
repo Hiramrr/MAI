@@ -54,6 +54,7 @@ public struct NativeTextEditor: NSViewRepresentable {
         view.delegate = context.coordinator
         scroll.documentView = view
         session.textView = view
+        context.coordinator.lastText = text
         session.refreshOutline(text)
         session.onPreviewCommitted = { [weak coordinator = context.coordinator] committed in
             coordinator?.syncPreview(committed)
@@ -66,11 +67,16 @@ public struct NativeTextEditor: NSViewRepresentable {
         guard let view = scroll.documentView as? WritingTextView else { return }
         // Durante la preview el NSTextView manda: reescribirlo borraría la
         // opción provisional. Al terminar, syncPreview ya actualizó el binding.
-        if !session.isPreviewing, view.string != text {
-            let selection = view.selectedRange()
-            view.string = text
-            view.setSelectedRange(NSRange(location: min(selection.location, text.utf16.count), length: 0))
-            session.refreshOutline(text)
+        // `lastText` es lo que ya muestra la vista: tras cada tecla el binding
+        // devuelve ese mismo String y la comparación no recorre el documento.
+        if !session.isPreviewing, text != context.coordinator.lastText {
+            context.coordinator.lastText = text
+            if view.string.nativeCopy() != text {
+                let selection = view.selectedRange()
+                view.string = text
+                view.setSelectedRange(NSRange(location: min(selection.location, text.utf16.count), length: 0))
+                session.refreshOutline(text)
+            }
         }
         if view.style != style {
             view.style = style
@@ -105,6 +111,8 @@ public struct NativeTextEditor: NSViewRepresentable {
 
     @MainActor public final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeTextEditor
+        /// Copia nativa del texto de la vista fuera de la preview.
+        var lastText = ""
         init(_ parent: NativeTextEditor) { self.parent = parent }
 
         public func textDidChange(_ notification: Notification) {
@@ -112,10 +120,12 @@ public struct NativeTextEditor: NSViewRepresentable {
             // La preview no toca el binding ni el índice: es provisional hasta
             // confirmar o cancelar (entonces syncPreview sincroniza).
             guard !parent.session.isPreviewing else { return }
-            parent.text = view.string
-            parent.session.refreshOutline(view.string)
-            parent.onTextActivity?(view.string, view.selectedRange())
-            view.typingAttributes = parent.style.attributes
+            let text = view.string.nativeCopy()
+            lastText = text
+            parent.text = text
+            parent.session.refreshOutline(text)
+            parent.onTextActivity?(text, view.selectedRange())
+            view.typingAttributes = view.styleAttributes
             if view.typewriterMode && !view.hasMarkedText() { view.centerInsertionPoint() }
         }
 
@@ -125,12 +135,14 @@ public struct NativeTextEditor: NSViewRepresentable {
             // el módulo lo confundiera con una edición externa y cancelara la
             // sesión al primer movimiento. Al terminar, syncPreview empuja.
             if !parent.session.isPreviewing, let view = notification.object as? WritingTextView {
-                parent.onTextActivity?(view.string, view.selectedRange())
+                parent.onTextActivity?(lastText, view.selectedRange())
             }
         }
 
         /// Sincroniza el binding tras confirmar o cancelar una preview.
         func syncPreview(_ committed: String) {
+            let committed = committed.nativeCopy()
+            lastText = committed
             parent.text = committed
             parent.session.refreshOutline(committed)
             if let view = parent.session.textView {
@@ -142,7 +154,17 @@ public struct NativeTextEditor: NSViewRepresentable {
 
 @MainActor final class WritingTextView: NSTextView, @MainActor NSTextStorageDelegate {
     var documentURL: URL?
-    var style = WritingStyle()
+    var style = WritingStyle() {
+        didSet { if style != oldValue { cachedAttributes = nil } }
+    }
+    private var cachedAttributes: [NSAttributedString.Key: Any]?
+    /// `style.attributes` crea fuente y estilo de párrafo; se pide en cada tecla.
+    var styleAttributes: [NSAttributedString.Key: Any] {
+        if let cachedAttributes { return cachedAttributes }
+        let attributes = style.attributes
+        cachedAttributes = attributes
+        return attributes
+    }
     var paragraphFocus = false
     var typewriterMode = false
     private var paragraphRect = NSRect.zero
@@ -234,7 +256,7 @@ public struct NativeTextEditor: NSViewRepresentable {
         decoratedStyle = style
         changedRange = nil
         storage.delegate = self
-        typingAttributes = style.attributes
+        typingAttributes = styleAttributes
         updateParagraphHighlight()
         needsDisplay = true
     }
@@ -245,7 +267,7 @@ public struct NativeTextEditor: NSViewRepresentable {
             guard (storage.string as NSString).substring(with: block.range) == block.raw else { continue }
             let width = min(CGFloat(block.source.width), max(80, textContainer?.size.width ?? 480))
             let height = width * block.image.size.height / block.image.size.width
-            let paragraph = (style.attributes[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+            let paragraph = (styleAttributes[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
             paragraph.minimumLineHeight = height + 16
             paragraph.maximumLineHeight = height + 16
             storage.addAttributes([.font: NSFont.systemFont(ofSize: 0.1), .foregroundColor: NSColor.clear], range: block.range)
@@ -254,12 +276,34 @@ public struct NativeTextEditor: NSViewRepresentable {
         needsDisplay = true
     }
 
-    private func imageRect(at index: Int, width override: CGFloat? = nil) -> NSRect? {
-        guard images.indices.contains(index), let layoutManager, let textContainer else { return nil }
-        let block = images[index]
-        let glyph = layoutManager.glyphRange(forCharacterRange: NSRange(location: block.range.location, length: 1), actualCharacterRange: nil)
+    /// Borde superior de la línea en coordenadas del contenedor. Con TextKit 2
+    /// no se toca `layoutManager`: pedirlo pasa la vista a TextKit 1 para
+    /// siempre y obliga a maquetar todo el documento de forma contigua.
+    private func lineTop(at location: Int) -> CGFloat? {
+        if let textLayoutManager {
+            guard let content = textLayoutManager.textContentManager,
+                  let start = content.location(content.documentRange.location, offsetBy: location) else { return nil }
+            textLayoutManager.ensureLayout(for: NSTextRange(location: start))
+            guard let fragment = textLayoutManager.textLayoutFragment(for: start) else { return nil }
+            let offset = content.offset(from: fragment.rangeInElement.location, to: start)
+            let lines = fragment.textLineFragments
+            // El marco del fragmento coincide con la línea de TextKit 1; las
+            // líneas internas ya incluyen el interlineado previo.
+            guard let index = lines.firstIndex(where: { $0.characterRange.contains(offset) }), index > 0 else {
+                return fragment.layoutFragmentFrame.minY
+            }
+            return fragment.layoutFragmentFrame.minY + lines[index].typographicBounds.minY
+        }
+        guard let layoutManager else { return nil }
+        let glyph = layoutManager.glyphRange(forCharacterRange: NSRange(location: location, length: 1), actualCharacterRange: nil)
         guard glyph.length > 0 else { return nil }
-        let line = layoutManager.lineFragmentRect(forGlyphAt: glyph.location, effectiveRange: nil)
+        return layoutManager.lineFragmentRect(forGlyphAt: glyph.location, effectiveRange: nil).minY
+    }
+
+    func imageRect(at index: Int, width override: CGFloat? = nil) -> NSRect? {
+        guard images.indices.contains(index), let textContainer else { return nil }
+        let block = images[index]
+        guard let top = lineTop(at: block.range.location) else { return nil }
         let width = override ?? min(CGFloat(block.source.width), max(80, textContainer.size.width))
         let height = width * block.image.size.height / block.image.size.width
         let x: CGFloat
@@ -268,7 +312,7 @@ public struct NativeTextEditor: NSViewRepresentable {
         case .center: x = textContainerOrigin.x + max(0, (textContainer.size.width - width) / 2)
         case .right: x = textContainerOrigin.x + max(0, textContainer.size.width - width)
         }
-        return NSRect(x: x, y: textContainerOrigin.y + line.minY + 8, width: width, height: height)
+        return NSRect(x: x, y: textContainerOrigin.y + top + 8, width: width, height: height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -472,8 +516,15 @@ public struct NativeTextEditor: NSViewRepresentable {
     }
 
     func updateParagraphHighlight() {
+        let previous = paragraphRect
         paragraphRect = .zero
-        defer { needsDisplay = true }
+        // Solo se repinta la franja que cambia, no toda la vista en cada tecla.
+        defer {
+            if paragraphRect != previous {
+                setNeedsDisplay(previous.insetBy(dx: -1, dy: -1))
+                setNeedsDisplay(paragraphRect.insetBy(dx: -1, dy: -1))
+            }
+        }
         guard paragraphFocus, let window, !string.isEmpty else { return }
         let text = string as NSString
         let range = text.paragraphRange(for: NSRange(location: min(selectedRange().location, text.length), length: 0))

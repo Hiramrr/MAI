@@ -5,6 +5,8 @@ import ExportFeature
 private struct SessionKey: FocusedValueKey { typealias Value = EditorSession }
 private struct TitleKey: FocusedValueKey { typealias Value = String }
 private struct NewDocumentKey: FocusedValueKey { typealias Value = () -> Void }
+private struct NavigationVisibleKey: FocusedValueKey { typealias Value = Binding<Bool> }
+private struct InspectorVisibleKey: FocusedValueKey { typealias Value = Binding<Bool> }
 extension FocusedValues {
     var writingSession: EditorSession? {
         get { self[SessionKey.self] }
@@ -18,12 +20,28 @@ extension FocusedValues {
         get { self[NewDocumentKey.self] }
         set { self[NewDocumentKey.self] = newValue }
     }
+    var navigationVisible: Binding<Bool>? {
+        get { self[NavigationVisibleKey.self] }
+        set { self[NavigationVisibleKey.self] = newValue }
+    }
+    var inspectorVisible: Binding<Bool>? {
+        get { self[InspectorVisibleKey.self] }
+        set { self[InspectorVisibleKey.self] = newValue }
+    }
+}
+
+/// Lado de la barra de navegación; el inspector ocupa el contrario.
+public enum SidebarSide: String, CaseIterable, Sendable {
+    case leading, trailing
+    public static let storageKey = "editor.sidebarSide"
 }
 
 public struct EditorMenus: Commands {
     @FocusedValue(\.writingSession) private var session
     @FocusedValue(\.writingTitle) private var title
     @FocusedValue(\.newDocument) private var newDocument
+    @FocusedValue(\.navigationVisible) private var navigationVisible
+    @FocusedValue(\.inspectorVisible) private var inspectorVisible
     public init() {}
     public var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -43,6 +61,18 @@ public struct EditorMenus: Commands {
             Button("Cita") { session?.send(.quote) }
             Button("Enlace…") { session?.send(.insertLink) }.keyboardShortcut("k")
             }.disabled(session == nil || session?.readingMode == true)
+        }
+        CommandGroup(replacing: .sidebar) {
+            Button(navigationVisible?.wrappedValue == true ? "Ocultar navegación" : "Mostrar navegación") {
+                navigationVisible?.wrappedValue.toggle()
+            }
+            .keyboardShortcut("s", modifiers: [.control, .command])
+            .disabled(navigationVisible == nil)
+            Button(inspectorVisible?.wrappedValue == true ? "Ocultar inspector" : "Mostrar inspector") {
+                inspectorVisible?.wrappedValue.toggle()
+            }
+            .keyboardShortcut("0", modifiers: [.option, .command])
+            .disabled(inspectorVisible == nil)
         }
         CommandGroup(after: .toolbar) {
             Divider()

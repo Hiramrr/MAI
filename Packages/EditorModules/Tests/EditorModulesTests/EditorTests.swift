@@ -141,6 +141,43 @@ final class MarkdownExperienceTests: XCTestCase {
         XCTAssertEqual(session.imageRange(atNormalizedPoint: normalized), NSRange(location: 0, length: (standard as NSString).length - 1))
     }
 
+    @MainActor func testImageGeometryStaysInTextKit2() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 100, pixelsHigh: 50,
+                                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                                    isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: folder.appendingPathComponent("a.png"))
+        let image = MarkdownImage(alt: "A", path: "a.png", width: 300, alignment: .right).markdown
+        let text = "# Título\n\nUn párrafo largo que se envuelve en varias líneas dentro del contenedor del editor para mover la imagen.\n" + image + "\nFin\n\n" + image + "\n"
+        let view = WritingTextView(usingTextLayoutManager: true)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 800)
+        view.textContainer?.widthTracksTextView = true
+        view.textContainerInset = NSSize(width: 28, height: 24)
+        view.documentURL = folder.appendingPathComponent("nota.md")
+        view.string = text
+        view.applyAnalysis(MarkdownDocument(text))
+        let layout = try XCTUnwrap(view.textLayoutManager)
+        let content = try XCTUnwrap(layout.textContentManager)
+        var previousBottom = -CGFloat.infinity
+        for (index, location) in [(0, (text as NSString).range(of: image).location),
+                                  (1, (text as NSString).range(of: image, options: .backwards).location)] {
+            let rect = try XCTUnwrap(view.imageRect(at: index))
+            let start = try XCTUnwrap(content.location(content.documentRange.location, offsetBy: location))
+            let line = try XCTUnwrap(layout.textLayoutFragment(for: start)).layoutFragmentFrame
+                .offsetBy(dx: view.textContainerOrigin.x, dy: view.textContainerOrigin.y)
+            // La imagen ocupa el hueco que TextKit 2 reservó para su línea.
+            XCTAssertGreaterThanOrEqual(rect.minY, line.minY)
+            XCTAssertLessThanOrEqual(rect.maxY, line.maxY)
+            XCTAssertGreaterThan(rect.minY, previousBottom)
+            XCTAssertEqual(rect.maxX, view.textContainerOrigin.x + (view.textContainer?.size.width ?? 0), accuracy: 0.5)
+            previousBottom = rect.maxY
+        }
+        XCTAssertNotNil(view.imageRange(at: NSPoint(x: 500, y: 200)))
+        XCTAssertNotNil(view.textLayoutManager, "Las imágenes no deben pasar el editor a TextKit 1.")
+    }
+
     func testFencesUnicodeAndStatistics() {
         let source = "# Café 🐈\r\n\r\n~~~swift\r\n# No es título\r\n```\r\n~~~\r\n## Fin\r\n"
         let document = MarkdownDocument(source)

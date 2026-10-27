@@ -5,6 +5,17 @@ import DiagramModule
 
 @MainActor public enum MarkdownAppearance {
     private static let inlineMarkers = CharacterSet(charactersIn: "\\`<[!*_~")
+    // Derivar fuentes con NSFontManager/CoreText domina el decorado de
+    // documentos grandes; cada combinación se repite miles de veces.
+    private struct TraitKey: Hashable {
+        let font: NSFont
+        let traits: UInt
+    }
+    private static var traitFonts: [TraitKey: NSFont] = [:]
+    private static var markerFonts: [NSFont: NSFont] = [:]
+    private static let markerAttributes: [NSAttributedString.Key] = [
+        .backgroundColor, .underlineStyle, .underlineColor, .strikethroughStyle, .strikethroughColor, .link,
+    ]
 
     public static func decorate(_ storage: NSMutableAttributedString, document: MarkdownDocument, style: WritingStyle, lines: Range<Int>? = nil) {
         let selectedLines = document.lines[lines ?? document.lines.indices]
@@ -77,7 +88,10 @@ import DiagramModule
         let effectiveRange = NSRange(location: lineRange.location, length: effectiveLength)
         let marker = nsString.rangeOfCharacter(from: inlineMarkers, range: effectiveRange)
         guard marker.location != NSNotFound else { return }
-        scanInline(lineText: nsString.substring(with: effectiveRange), baseOffset: effectiveRange.location, storage: storage, style: style)
+        // Copia nativa: recorrer por Character un String puenteado es varias veces más lento.
+        var lineText = nsString.substring(with: effectiveRange)
+        lineText.makeContiguousUTF8()
+        scanInline(lineText: lineText, baseOffset: effectiveRange.location, storage: storage, style: style)
     }
 
     private static func nsRange(of range: Range<String.Index>, in text: String, base: Int) -> NSRange? {
@@ -93,14 +107,22 @@ import DiagramModule
         guard let scalar = character.unicodeScalars.first, character.unicodeScalars.count == 1 else { return false }
         let value = scalar.value
         // Puntuación ASCII escapable en Markdown.
-        if value < 128 {
-            let puentes: Set<UInt32> = [33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 58, 59, 60, 61, 62, 63, 64, 91, 92, 93, 94, 95, 96, 123, 124, 125, 126]
-            return puentes.contains(value)
+        switch value {
+        case 33...47, 58...64, 91...96, 123...126: return true
+        default: return false
         }
-        return false
     }
 
     private static func fontAdding(traits wanted: NSFontTraitMask, to font: NSFont) -> NSFont {
+        let key = TraitKey(font: font, traits: wanted.rawValue)
+        if let cached = traitFonts[key] { return cached }
+        if traitFonts.count > 512 { traitFonts.removeAll() }
+        let result = deriveFont(adding: wanted, to: font)
+        traitFonts[key] = result
+        return result
+    }
+
+    private static func deriveFont(adding wanted: NSFontTraitMask, to font: NSFont) -> NSFont {
         let current = NSFontManager.shared.traits(of: font)
         if current.contains(wanted) { return font }
         let combined = current.union(wanted)
@@ -125,18 +147,26 @@ import DiagramModule
     /// Conserva negrita/cursiva para no romper el estilo exterior.
     private static func collapseMarker(in storage: NSMutableAttributedString, range: NSRange) {
         guard range.length > 0, NSMaxRange(range) <= storage.length else { return }
-        let current = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
-        let base = current ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let base = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+            ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        storage.addAttributes([.font: markerFont(for: base), .foregroundColor: NSColor.clear], range: range)
+        // Quitar un atributo ausente también cuesta una edición del storage.
+        for key in markerAttributes {
+            var effective = NSRange()
+            if storage.attribute(key, at: range.location, effectiveRange: &effective) != nil
+                || NSMaxRange(effective) < NSMaxRange(range) {
+                storage.removeAttribute(key, range: range)
+            }
+        }
+    }
+
+    private static func markerFont(for base: NSFont) -> NSFont {
+        if let cached = markerFonts[base] { return cached }
+        if markerFonts.count > 256 { markerFonts.removeAll() }
         let tiny = NSFontManager.shared.convert(base, toSize: 0.1)
-        let finalFont: NSFont = tiny.pointSize < 1 ? tiny : (NSFont(descriptor: base.fontDescriptor, size: 0.1) ?? tiny)
-        storage.addAttribute(.font, value: finalFont, range: range)
-        storage.addAttribute(.foregroundColor, value: NSColor.clear, range: range)
-        storage.removeAttribute(.backgroundColor, range: range)
-        storage.removeAttribute(.underlineStyle, range: range)
-        storage.removeAttribute(.underlineColor, range: range)
-        storage.removeAttribute(.strikethroughStyle, range: range)
-        storage.removeAttribute(.strikethroughColor, range: range)
-        storage.removeAttribute(.link, range: range)
+        let result: NSFont = tiny.pointSize < 1 ? tiny : (NSFont(descriptor: base.fontDescriptor, size: 0.1) ?? tiny)
+        markerFonts[base] = result
+        return result
     }
 
     private static func scanInline(lineText: String, baseOffset: Int, storage: NSMutableAttributedString, style: WritingStyle) {

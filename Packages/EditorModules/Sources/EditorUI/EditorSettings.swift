@@ -22,6 +22,7 @@ public struct EditorSettings: View {
     @AppStorage("editor.syntax") private var syntax = true
     @AppStorage("editor.statistics") private var statistics = true
     @AppStorage("editor.appearance") private var appearance = "system"
+    @AppStorage(SidebarSide.storageKey) private var sidebarSide = SidebarSide.leading.rawValue
     @AppStorage(CloudDocuments.enabledKey) private var saveToICloud = false
     @AppStorage(CloudDocuments.pathKey) private var cloudFolderPath = ""
     @State private var fontSearch = ""
@@ -85,6 +86,15 @@ public struct EditorSettings: View {
                     }
                     .pickerStyle(.segmented)
                     Text("Según el Mac cambia entre claro y oscuro con el sistema.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Ventana") {
+                    Picker("Barra de navegación", selection: $sidebarSide) {
+                        Text("Izquierda").tag(SidebarSide.leading.rawValue)
+                        Text("Derecha").tag(SidebarSide.trailing.rawValue)
+                    }
+                    .pickerStyle(.segmented)
+                    Text("El inspector del documento se coloca en el lado contrario. Muestra u oculta cada panel con ⌃⌘S y ⌥⌘0, o desde el menú Visualización.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Combinación de colores") {
@@ -193,7 +203,11 @@ public struct EditorSettings: View {
                         LabeledContent("Estado", value: "Disponible")
                         LabeledContent("Dictar", value: "⌃⌘V")
                         LabeledContent("Mantener para hablar", value: "⌥Espacio")
-                        Text("Para usar Manos libres, pulsa el micrófono una vez. El dictado aparece en el documento y se inserta al hacer una pausa. Para cambios, di el comando y luego «confirmar», «descartar» o «repetir». Di «detener voz» para salir. También puedes mantener ⌥Espacio para hablar por turnos. El audio se procesa en este Mac.")
+                        LabeledContent("Confirmar un cambio", value: "«sí» o Enter")
+                        LabeledContent("Descartar un cambio", value: "«no» o Esc")
+                        LabeledContent("Ver ejemplos", value: "«qué puedo decir»")
+                        LabeledContent("Terminar", value: "«detener voz»")
+                        Text("Pulsa el micrófono y habla: cada pausa escribe lo dictado. Las órdenes que cambian el documento piden confirmación. El panel del micrófono muestra ejemplos y recuerda tus opciones (Manos libres, ⌥Espacio, estilo e idioma). El audio se procesa en este Mac.")
                             .font(.callout).foregroundStyle(.secondary)
                     } else {
                         Text("La voz no está disponible en esta versión de la app.")
@@ -249,6 +263,7 @@ public struct EditorSettings: View {
         lightTextHex = "auto"; lightBackgroundHex = "auto"; lightAccentHex = "auto"
         darkTextHex = "auto"; darkBackgroundHex = "auto"; darkAccentHex = "auto"
         syntax = true; statistics = true; appearance = "system"
+        sidebarSide = SidebarSide.leading.rawValue
     }
 
     private var themePreview: some View {

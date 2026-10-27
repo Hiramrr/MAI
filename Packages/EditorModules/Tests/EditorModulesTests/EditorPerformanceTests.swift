@@ -48,6 +48,20 @@ final class EditorPerformanceTests: XCTestCase {
         check()
     }
 
+    @MainActor func testNativeCopyKeepsTextAndUTF16Offsets() {
+        let view = NSTextView(usingTextLayoutManager: true)
+        view.string = "Café 👩🏽‍💻 日本語\r\nfin"
+        let lone = String(utf16CodeUnits: [0x61, 0xD83D, 0x62], count: 3)
+        view.textStorage?.append(NSAttributedString(string: lone))
+        let bridged = view.string
+        let copy = bridged.nativeCopy()
+        XCTAssertTrue(copy.isContiguousUTF8)
+        XCTAssertEqual(copy.utf16.count, (bridged as NSString).length)
+        XCTAssertEqual(copy, bridged)
+        XCTAssertEqual("".nativeCopy(), "")
+        XCTAssertEqual(copy.nativeCopy(), copy)
+    }
+
     @MainActor func testLibraryListsOnlySupportedFiles() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -123,6 +137,7 @@ final class EditorPerformanceTests: XCTestCase {
             view.undoManager?.endUndoGrouping()
             view.breakUndoCoalescing()
             let updated = view.string
+            let reanalyzing = clock.now
             let updatedAnalysis = MarkdownDocument(updated)
             let redecorating = clock.now
             view.applyAnalysis(updatedAnalysis)
@@ -135,7 +150,7 @@ final class EditorPerformanceTests: XCTestCase {
             XCTAssertEqual(view.string, source)
             session.send(.redo)
             XCTAssertEqual(view.string, updated)
-            print("PERFORMANCE \(size): analysis=\(start.duration(to: analyzed)) decoration=\(analyzed.duration(to: decorated)) edit=\(editing.duration(to: edited)) redecorate=\(redecorating.duration(to: finished))")
+            print("PERFORMANCE \(size): analysis=\(start.duration(to: analyzed)) decoration=\(analyzed.duration(to: decorated)) edit=\(editing.duration(to: edited)) reanalysis=\(reanalyzing.duration(to: redecorating)) redecorate=\(redecorating.duration(to: finished))")
         }
     }
 }
