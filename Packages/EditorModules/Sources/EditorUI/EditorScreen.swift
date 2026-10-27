@@ -87,6 +87,7 @@ public struct EditorScreen: View {
     @AppStorage("editor.syntax") private var syntax = true
     @AppStorage("editor.statistics") private var statistics = true
     @AppStorage("editor.appearance") private var appearance = "system"
+    @AppStorage(SidebarSide.storageKey) private var sidebarSide = SidebarSide.leading.rawValue
     @AppStorage("editor.customFolders") private var customFolderPaths = ""
     @AppStorage("editor.favorites") private var favoritePaths = ""
     @AppStorage("editor.archived") private var archivedPaths = ""
@@ -217,7 +218,7 @@ public struct EditorScreen: View {
     }
     private var activeHeading: Int? { session.headings.last(where: { $0.offset <= session.cursorOffset })?.id }
     private var savedFolders: [URL] {
-        customFolderPaths.split(separator: "|").map { URL(fileURLWithPath: String($0)) }
+        StoredPaths.decode(customFolderPaths).sorted().map { URL(fileURLWithPath: $0) }
     }
     private var sampleFolder: URL? {
         Bundle.main.url(forResource: "Samples", withExtension: nil)
@@ -246,25 +247,19 @@ public struct EditorScreen: View {
         let writableNames = Set(urls.filter { !$0.path.hasPrefix(Bundle.main.bundleURL.path) }.map(\.lastPathComponent))
         return urls.filter { !$0.path.hasPrefix(Bundle.main.bundleURL.path) || !writableNames.contains($0.lastPathComponent) }
     }
-    private func storedSet(_ raw: String) -> Set<String> {
-        Set(raw.split(separator: "|").map { String($0) }.filter { !$0.isEmpty })
-    }
-    private var favoriteKeys: Set<String> { storedSet(favoritePaths) }
-    private var archivedKeys: Set<String> { storedSet(archivedPaths) }
-    private var trashedKeys: Set<String> { storedSet(trashedPaths) }
+    private var favoriteKeys: Set<String> { StoredPaths.decode(favoritePaths) }
+    private var archivedKeys: Set<String> { StoredPaths.decode(archivedPaths) }
+    private var trashedKeys: Set<String> { StoredPaths.decode(trashedPaths) }
     private func storageKey(for url: URL) -> String { url.standardizedFileURL.path }
     private func isFavorite(_ url: URL) -> Bool { favoriteKeys.contains(storageKey(for: url)) }
     private func isArchived(_ url: URL) -> Bool { archivedKeys.contains(storageKey(for: url)) }
     private func isTrashed(_ url: URL) -> Bool { trashedKeys.contains(storageKey(for: url)) }
-    private func toggleStored(_ raw: String, key: String) -> String {
-        var set = storedSet(raw)
-        if set.contains(key) { set.remove(key) } else { set.insert(key) }
-        return set.sorted().joined(separator: "|")
-    }
-    private func setStored(_ raw: String, key: String, present: Bool) -> String {
-        var set = storedSet(raw)
-        if present { set.insert(key) } else { set.remove(key) }
-        return set.sorted().joined(separator: "|")
+    /// Tras renombrar, las marcas de biblioteca siguen al documento.
+    private func moveStoredMarks(from oldURL: URL, to newURL: URL) {
+        let old = storageKey(for: oldURL), new = storageKey(for: newURL)
+        favoritePaths = StoredPaths.renaming(favoritePaths, from: old, to: new)
+        archivedPaths = StoredPaths.renaming(archivedPaths, from: old, to: new)
+        trashedPaths = StoredPaths.renaming(trashedPaths, from: old, to: new)
     }
     private var activeURLs: [URL] {
         let excluded = trashedKeys.union(archivedKeys)
@@ -317,17 +312,17 @@ public struct EditorScreen: View {
         return baseURLs(for: dest).count
     }
     private func toggleFavorite(_ url: URL) {
-        favoritePaths = toggleStored(favoritePaths, key: storageKey(for: url))
+        favoritePaths = StoredPaths.toggling(favoritePaths, path: storageKey(for: url))
     }
     private func setArchived(_ url: URL, archived: Bool) {
-        archivedPaths = setStored(archivedPaths, key: storageKey(for: url), present: archived)
+        archivedPaths = StoredPaths.setting(archivedPaths, path: storageKey(for: url), present: archived)
     }
     private func setTrashed(_ url: URL, trashed: Bool) {
-        trashedPaths = setStored(trashedPaths, key: storageKey(for: url), present: trashed)
+        trashedPaths = StoredPaths.setting(trashedPaths, path: storageKey(for: url), present: trashed)
     }
     private func restore(_ url: URL) {
-        trashedPaths = setStored(trashedPaths, key: storageKey(for: url), present: false)
-        archivedPaths = setStored(archivedPaths, key: storageKey(for: url), present: false)
+        trashedPaths = StoredPaths.setting(trashedPaths, path: storageKey(for: url), present: false)
+        archivedPaths = StoredPaths.setting(archivedPaths, path: storageKey(for: url), present: false)
     }
     private func moveToSystemTrash(_ url: URL) {
         let key = storageKey(for: url)
@@ -347,9 +342,9 @@ public struct EditorScreen: View {
             NSApplication.shared.presentError(error)
             return
         }
-        favoritePaths = setStored(favoritePaths, key: key, present: false)
-        archivedPaths = setStored(archivedPaths, key: key, present: false)
-        trashedPaths = setStored(trashedPaths, key: key, present: false)
+        favoritePaths = StoredPaths.setting(favoritePaths, path: key, present: false)
+        archivedPaths = StoredPaths.setting(archivedPaths, path: key, present: false)
+        trashedPaths = StoredPaths.setting(trashedPaths, path: key, present: false)
         libraryRevision += 1
     }
     private func emptyTrash() {
@@ -362,11 +357,11 @@ public struct EditorScreen: View {
     }
 
     public var body: some View {
+        // Navegación e inspector son columnas fijas: con `.inspector` el panel
+        // flotaba sobre el texto al estrechar la ventana. Cada uno ocupa el
+        // lado contrario del otro según `editor.sidebarSide`.
         HSplitView {
-            if showSidebar && !session.focusMode {
-                sidebar
-                    .frame(minWidth: 230, idealWidth: 260, maxWidth: 320)
-            }
+            if navigationOnTrailing { inspectorColumn } else { navigationColumn }
             if isShowingHome {
                 home
                     .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
@@ -379,12 +374,7 @@ public struct EditorScreen: View {
                     .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color(nsColor: style.effectiveBackgroundColor))
             }
-        }
-        .inspector(isPresented: Binding(
-            get: { showInspector && !session.focusMode && !isShowingHome },
-            set: { if !session.focusMode { showInspector = $0 } }
-        )) {
-            inspector.inspectorColumnWidth(min: 220, ideal: 250, max: 320)
+            if navigationOnTrailing { navigationColumn } else { inspectorColumn }
         }
         .background(Color(nsColor: style.effectiveBackgroundColor))
         // La barra superior (titlebar) no hereda el fondo del contenido y se
@@ -397,6 +387,8 @@ public struct EditorScreen: View {
         .focusedSceneValue(\.writingSession, session)
         .focusedSceneValue(\.writingTitle, documentTitle)
         .focusedSceneValue(\.newDocument, createDocument)
+        .focusedSceneValue(\.navigationVisible, panelBinding($showSidebar))
+        .focusedSceneValue(\.inspectorVisible, isShowingHome ? nil : panelBinding($showInspector))
         .onChange(of: currentURL) { oldURL, newURL in
             if oldURL == nil, let newURL { adoptDraftImages(into: newURL) }
             libraryRevision += 1
@@ -554,11 +546,12 @@ public struct EditorScreen: View {
                 .keyboardShortcut("[", modifiers: .command)
                 .disabled(screenHistory.isEmpty && isShowingHome)
         }
-        ToolbarItem(placement: .navigation) {
-            Button { showSidebar.toggle() } label: { Image(systemName: "sidebar.left") }
-                .help("Mostrar u ocultar navegación · ⌃⌘S").accessibilityLabel("Mostrar u ocultar navegación")
-                .keyboardShortcut("s", modifiers: [.control, .command])
-                .disabled(session.focusMode)
+        if navigationOnTrailing {
+            if !isShowingHome {
+                ToolbarItem(placement: .navigation) { inspectorToggle }
+            }
+        } else {
+            ToolbarItem(placement: .navigation) { navigationToggle }
         }
         if !isShowingHome && !session.focusMode && !session.headings.isEmpty {
             ToolbarItem(placement: .navigation) {
@@ -609,12 +602,9 @@ public struct EditorScreen: View {
                     .help("Lectura y concentración").accessibilityLabel("Lectura y concentración")
                     .popover(isPresented: $showReadingControls, arrowEdge: .bottom) { readingControls }
             }
-            ToolbarSpacer(.fixed, placement: .primaryAction)
-            ToolbarItem(placement: .primaryAction) {
-                Button { showInspector.toggle() } label: { Image(systemName: "sidebar.right") }
-                    .help("Mostrar u ocultar inspector · ⌥⌘0").accessibilityLabel("Mostrar u ocultar inspector")
-                    .keyboardShortcut("0", modifiers: [.option, .command])
-                    .disabled(session.focusMode)
+            if !navigationOnTrailing {
+                ToolbarSpacer(.fixed, placement: .primaryAction)
+                ToolbarItem(placement: .primaryAction) { inspectorToggle }
             }
             // Pieza Lego: Voz. Sin módulo no se muestra ningún control falso.
             if let voicePanel {
@@ -632,7 +622,61 @@ public struct EditorScreen: View {
                 }
             }
         }
+        if navigationOnTrailing {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) { navigationToggle }
+        }
+    }
 
+    private var navigationOnTrailing: Bool { sidebarSide == SidebarSide.trailing.rawValue }
+    private var navigationSymbol: String { navigationOnTrailing ? "sidebar.right" : "sidebar.left" }
+    private var inspectorSymbol: String { navigationOnTrailing ? "sidebar.left" : "sidebar.right" }
+
+    /// Los atajos ⌃⌘S y ⌥⌘0 viven en el menú Visualización (`EditorMenus`)
+    /// para que funcionen aunque la barra mande estos botones al desborde.
+    private var navigationToggle: some View {
+        Button { showSidebar.toggle() } label: { Image(systemName: navigationSymbol) }
+            .help(showSidebar ? "Ocultar navegación · ⌃⌘S" : "Mostrar navegación · ⌃⌘S")
+            .accessibilityLabel(showSidebar ? "Ocultar navegación" : "Mostrar navegación")
+            .disabled(session.focusMode)
+    }
+
+    private var inspectorToggle: some View {
+        Button { showInspector.toggle() } label: { Image(systemName: inspectorSymbol) }
+            .help(showInspector ? "Ocultar inspector · ⌥⌘0" : "Mostrar inspector · ⌥⌘0")
+            .accessibilityLabel(showInspector ? "Ocultar inspector" : "Mostrar inspector")
+            .disabled(session.focusMode)
+    }
+
+    /// En concentración los paneles no se muestran ni se alternan.
+    private func panelBinding(_ visible: Binding<Bool>) -> Binding<Bool>? {
+        session.focusMode ? nil : visible
+    }
+
+    @ViewBuilder private var navigationColumn: some View {
+        if showSidebar && !session.focusMode {
+            sidebar
+                .frame(minWidth: 230, idealWidth: 260, maxWidth: 320)
+        }
+    }
+
+    @ViewBuilder private var inspectorColumn: some View {
+        if showInspector && !session.focusMode && !isShowingHome {
+            inspector
+                .frame(minWidth: 220, idealWidth: 250, maxWidth: 320)
+        }
+    }
+
+    private func hidePanelButton(_ label: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .frame(minWidth: 32, minHeight: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(chromeSecondary)
+        .help(label)
+        .accessibilityLabel(label)
     }
 
     private var sidebar: some View {
@@ -712,6 +756,7 @@ public struct EditorScreen: View {
                         .contentShape(Rectangle())
                 }
                     .accessibilityLabel("Configuración")
+                hidePanelButton("Ocultar navegación · ⌃⌘S", symbol: navigationSymbol) { showSidebar = false }
             }.buttonStyle(.plain).font(.callout).foregroundStyle(chromeSecondary).padding(.horizontal, 8).padding(.vertical, 4)
         }
         .padding(12).padding(.top, 14).padding(.bottom, 8)
@@ -758,7 +803,7 @@ public struct EditorScreen: View {
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
-    private func outlineRow(for heading: DocumentHeading) -> some View {
+    private func outlineRow(for heading: DocumentHeading, active activeHeading: Int?) -> some View {
         Button { navigate(to: heading) } label: {
             HStack(alignment: .top, spacing: 8) {
                 RoundedRectangle(cornerRadius: 1).fill(activeHeading == heading.id ? themeAccent : .clear).frame(width: 2)
@@ -775,8 +820,13 @@ public struct EditorScreen: View {
 
     private var inspector: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Label("Documento", systemImage: "slider.horizontal.3")
-                .font(.headline).foregroundStyle(chromePrimary).padding(20)
+            HStack {
+                Label("Documento", systemImage: "slider.horizontal.3")
+                    .font(.headline).foregroundStyle(chromePrimary)
+                Spacer()
+                hidePanelButton("Ocultar inspector · ⌥⌘0", symbol: inspectorSymbol) { showInspector = false }
+            }
+            .padding(.leading, 20).padding(.trailing, 12).padding(.vertical, 14)
             Divider()
             if statistics {
                 VStack(alignment: .leading, spacing: 12) {
@@ -907,8 +957,9 @@ public struct EditorScreen: View {
                             .font(.callout).foregroundStyle(chromeSecondary)
                             .padding(14)
                     }
+                    let active = activeHeading
                     ForEach(session.headings) { heading in
-                        outlineRow(for: heading)
+                        outlineRow(for: heading, active: active)
                     }
                 }.padding(10)
             }
@@ -1314,6 +1365,7 @@ public struct EditorScreen: View {
             if let error {
                 NSApplication.shared.presentError(error)
             } else {
+                moveStoredMarks(from: currentURL, to: dest)
                 documentTitle = dest.deletingPathExtension().lastPathComponent
             }
         }
@@ -1518,7 +1570,7 @@ public struct EditorScreen: View {
             let folder = parent.appendingPathComponent(name, isDirectory: true)
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
-                customFolderPaths = Array(Set(savedFolders.map(\.path) + [folder.path])).sorted().joined(separator: "|")
+                customFolderPaths = StoredPaths.setting(customFolderPaths, path: folder.path, present: true)
             } catch {
                 NSApplication.shared.presentError(error)
             }
@@ -1571,6 +1623,7 @@ public struct EditorScreen: View {
                 NSApplication.shared.presentError(error)
                 documentTitle = oldTitle
             } else {
+                moveStoredMarks(from: documentURL, to: destination)
                 documentTitle = destination.deletingPathExtension().lastPathComponent
             }
         }
