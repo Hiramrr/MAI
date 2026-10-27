@@ -66,6 +66,7 @@ public final class EditorSession {
     }
 
     public func refreshOutline(_ text: String) {
+        let text = text.nativeCopy()
         generation += 1
         let revision = generation
         outlineTask?.cancel()
@@ -73,10 +74,11 @@ public final class EditorSession {
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
             let analysis = await Self.analyze(text)
             guard !Task.isCancelled, let self, self.generation == revision,
-                  !self.isPreviewing, self.textView?.string == text else { return }
+                  !self.isPreviewing, self.textView?.string.nativeCopy() == text else { return }
             self.analysis = analysis
-            self.headings = analysis.headings
-            self.statistics = analysis.statistics
+            let headings = analysis.headings
+            if self.headings != headings { self.headings = headings }
+            if self.statistics != analysis.statistics { self.statistics = analysis.statistics }
             self.analysisRevision += 1
             (self.textView as? WritingTextView)?.applyAnalysis(analysis)
         }
@@ -88,15 +90,17 @@ public final class EditorSession {
 
     public func selectionChanged() {
         guard let view = textView else { return }
-        cursorOffset = view.selectedRange().location
         let range = view.selectedRange()
+        // Cada escritura en una propiedad observada invalida la pantalla.
+        if cursorOffset != range.location { cursorOffset = range.location }
         let selectedText = range.length == 0 ? "" : (view.string as NSString).substring(with: range)
-        selectedCharacters = selectedText.count
         var words = 0
         selectedText.enumerateSubstrings(in: selectedText.startIndex..., options: [.byWords, .substringNotRequired]) { _, _, _, _ in
             words += 1
         }
-        selectedWords = words
+        let characters = selectedText.count
+        if selectedCharacters != characters { selectedCharacters = characters }
+        if selectedWords != words { selectedWords = words }
         (view as? WritingTextView)?.updateParagraphHighlight()
     }
 
@@ -167,7 +171,7 @@ public final class EditorSession {
             voicePreviewActive = isPreviewing
         case .showVoicePreview(let text):
             guard voicePreviewActive else { break }
-            showPreview(option: text)
+            showPreview(option: Self.spacedDictation(text, after: view.string, at: previewLocation))
             voicePreviewActive = isPreviewing
         case .commitVoicePreview(let text):
             if voicePreviewActive {
@@ -176,7 +180,12 @@ public final class EditorSession {
                 let unchanged = NSMaxRange(span) <= current.length && current.substring(with: span) == previewCurrent
                 cancelPreview()
                 voicePreviewActive = false
-                if unchanged { edit(view) { $0.insertText(text, replacementRange: $0.selectedRange()) } }
+                if unchanged {
+                    edit(view) {
+                        let range = $0.selectedRange()
+                        $0.insertText(Self.spacedDictation(text, after: $0.string, at: range.location), replacementRange: range)
+                    }
+                }
             }
         case .cancelVoicePreview:
             if voicePreviewActive { cancelPreview(); voicePreviewActive = false }
@@ -200,6 +209,19 @@ public final class EditorSession {
 
     /// Una sola operación de Undo por comando de voz: aísla la mutación del
     /// tecleo adyacente (funciona con groupsByEvent true o false).
+    /// Separa un dictado del texto que lo precede: sin esto, dos frases
+    /// seguidas quedarían pegadas («Hola.Sigo»). No añade nada al inicio de
+    /// una línea, tras un espacio o un signo de apertura, ni si el dictado
+    /// empieza con un salto o con puntuación de cierre.
+    static func spacedDictation(_ text: String, after document: String, at location: Int) -> String {
+        let ns = document as NSString
+        guard location > 0, location <= ns.length, let first = text.first,
+              !first.isWhitespace, !",.;:?!…%)»".contains(first) else { return text }
+        let before = ns.substring(with: ns.rangeOfComposedCharacterSequence(at: location - 1))
+        guard let previous = before.last, !previous.isWhitespace, !"(¿¡«\"'".contains(previous) else { return text }
+        return " " + text
+    }
+
     private func edit(_ view: NSTextView, _ body: (NSTextView) -> Void) {
         view.breakUndoCoalescing()
         view.undoManager?.beginUndoGrouping()
@@ -327,25 +349,27 @@ public final class EditorSession {
     // MARK: - Reescritura con IA (voz "hazlo más breve")
 
     /// Prepara una propuesta visible sin tocar el documento ni su undo.
-    public func prepareRewrite(instruction: String) async -> String? {
+    /// Lanza `ModelFailure` con la causa; si otra petición la reemplazó o
+    /// quien espera canceló, lanza `CancellationError` (no es un fallo).
+    public func prepareRewrite(instruction: String) async throws -> String {
+        try Task.checkCancellation()
         discardRewrite()
         let requestID = rewriteRequestID
-        guard !readingMode, !isPreviewing, let view = textView else { return nil }
+        guard !readingMode, !isPreviewing, let view = textView else { throw ModelFailure.notEditable }
         let range = view.selectedRange()
-        guard range.length > 0 else { return nil }
         let ns = view.string as NSString
-        guard NSMaxRange(range) <= ns.length else { return nil }
+        guard range.length > 0, NSMaxRange(range) <= ns.length else { throw ModelFailure.selectionMissing }
         let document = view.string
         let documentURL = (view as? WritingTextView)?.documentURL
         let original = ns.substring(with: range)
-        guard !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let rewritten = await rewriteProvider.rewrite(original, instruction: instruction) else { return nil }
-        guard requestID == rewriteRequestID,
-              !rewritten.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              rewritten != original, textView === view,
-              !readingMode, !isPreviewing, view.string == document,
+        guard !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ModelFailure.selectionMissing }
+        let rewritten = try await rewriteProvider.rewrite(original, instruction: instruction)
+        guard !Task.isCancelled, requestID == rewriteRequestID else { throw CancellationError() }
+        guard textView === view, !readingMode, !isPreviewing, view.string == document,
               (view as? WritingTextView)?.documentURL == documentURL,
-              view.selectedRange() == range else { return nil }
+              view.selectedRange() == range else { throw ModelFailure.selectionChanged }
+        guard !rewritten.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              rewritten != original else { throw ModelFailure.invalidOutput }
         rewriteProposal = (view, document, documentURL, range, rewritten)
         return rewritten
     }

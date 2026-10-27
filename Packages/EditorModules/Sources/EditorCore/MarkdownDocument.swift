@@ -174,7 +174,9 @@ public struct MarkdownDocument: Sendable {
         }
     }
 
-    public init(_ text: String) {
+    public init(_ source: String) {
+        // `NSTextView.string` llega puenteado; recorrerlo así es varias veces más lento.
+        let text = source.nativeCopy()
         var parsed: [MarkdownLine] = []
         var fence: (Character, Int)?
         var offset = 0
@@ -240,17 +242,17 @@ public struct MarkdownDocument: Sendable {
             inParagraph = !blank
             previousWasBlank = blank
 
-            let utf16Prefix = (String(raw.prefix(min(prefixChars, raw.count))) as NSString).length
-            let suffixString = trailingChars > 0 ? String(raw.suffix(min(trailingChars, raw.count))) : ""
-            let utf16Trailing = (suffixString as NSString).length
+            let utf16Prefix = prefixChars > 0 ? raw.prefix(prefixChars).utf16.count : 0
+            let utf16Trailing = trailingChars > 0 ? raw.suffix(trailingChars).utf16.count : 0
+            let length = text[enclosing].utf16.count
             parsed.append(MarkdownLine(
-                range: NSRange(location: offset, length: text[enclosing].utf16.count),
+                range: NSRange(location: offset, length: length),
                 content: content,
                 prefixLength: utf16Prefix,
                 trailingLength: utf16Trailing,
                 kind: kind
             ))
-            offset += text[enclosing].utf16.count
+            offset += length
         }
 
         // Tablas GFM: cabecera con `|` seguida de una fila de separación con el mismo número de celdas.
@@ -258,7 +260,7 @@ public struct MarkdownDocument: Sendable {
         while row + 1 < parsed.count {
             let header = parsed[row]
             let delimiter = parsed[row + 1]
-            guard header.kind == .text, header.content.contains("|"),
+            guard header.kind == .text, header.content.utf8.contains(UInt8(ascii: "|")),
                   delimiter.kind == .text || delimiter.kind == .rule,
                   let alignments = MarkdownTable.alignments(delimiter: delimiter.content),
                   alignments.count == MarkdownTable.cells(in: header.content).count else {
@@ -420,6 +422,8 @@ public struct MarkdownDocument: Sendable {
     }
 
     private static func isThematicBreak(_ line: String) -> Bool {
+        guard let lead = line.utf8.first(where: { $0 != UInt8(ascii: " ") && $0 != UInt8(ascii: "\t") }),
+              lead == UInt8(ascii: "-") || lead == UInt8(ascii: "*") || lead == UInt8(ascii: "_") else { return false }
         let filtered = line.filter { $0 != " " && $0 != "\t" }
         guard filtered.count >= 3 else { return false }
         guard let first = filtered.first, first == "-" || first == "*" || first == "_" else { return false }
