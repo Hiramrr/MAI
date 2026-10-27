@@ -26,6 +26,10 @@ por pausa cortó o juntó enunciados.
 | --- | --- | --- |
 | Frase ambigua | Titula bien tus ideas | Di «usar como texto» y luego «confirmar»; inserta el texto |
 | Dictado | Esta es una frase con una pausa para pensar y luego continúa | Texto provisional visible; una inserción tras la pausa, sin corte intermedio |
+| Dictado | Primera idea, pausa, segunda idea | Dos inserciones separadas por un espacio |
+| Dictado | Nuevo párrafo | Línea en blanco al momento, sin propuesta |
+| Dictado | Hola punto y aparte seguimos | Dos párrafos; el segundo empieza con mayúscula |
+| Ayuda | Qué puedo decir | El panel abre los ejemplos; texto intacto |
 | Navegación | Busca TDAH | Selección inmediata, texto intacto |
 | Navegación | Selecciona metodología | Selección inmediata, texto intacto |
 | Cambio | Cambia el título a prueba de usabilidad | Propuesta con el título exacto; «descartar» no renombra |
@@ -39,6 +43,9 @@ por pausa cortó o juntó enunciados.
 
 Prueba también dos frases seguidas sin pausa larga, como `Busca TDAH` y
 `Selecciona metodología`. Cuenta si el cierre automático las junta.
+Repite dos cambios respondiendo «sí» y «no» en lugar de «confirmar» y
+«descartar». Con Manos libres y sin propuesta, di solo «no»: debe
+escribirse como texto.
 Para abrir por nombre, prueba después dos archivos que contengan `acta`
 en el título. La app debe pedir que elijas uno.
 
@@ -74,3 +81,8 @@ Anota la duración entre terminar de hablar y ver la propuesta. Ajusta
 `autoEndpointSilence` solo tras medir tres rondas con el valor actual de
 1.6 segundos y repite las mismas frases con el nuevo valor. No compares
 sesiones con distinto micrófono como si midieran solo el temporizador.
+
+El cierre también espera 1.6 s sin voz en el micrófono. Repite una ronda con
+ruido de fondo constante (ventilador) y anota si la frase se cierra sola. En
+otra ronda pulsa «Descartar» mientras aparece «Preparando micrófono…» y
+comprueba que el indicador de micrófono de macOS no se enciende después.

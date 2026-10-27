@@ -67,6 +67,19 @@ cambio pendiente, sigue escuchando «confirmar», «descartar», «repetir» o
 «usar como texto». «Detener voz» termina la escucha. El silencio total nunca
 cierra solo. El umbral aún requiere medición con micrófono real.
 
+Actualización: el cierre también exige 1.6 s sin voz en el micrófono. Un
+nivel cuenta como voz si supera el umbral del reconocedor y el ruido de
+fondo más un margen; el ruido se estima en cada escucha (baja en el acto y
+sube despacio). Así, si Speech se atrasa mientras se sigue hablando, no se
+corta; push-to-talk sigue cerrando solo al soltar. Si `stop()` falla con
+texto reconocido, el panel muestra el error y el texto aparte para copiarlo,
+insertarlo como texto incompleto o descartarlo; no se ejecuta como orden ni se
+inserta solo, y no se empieza otra grabación hasta decidir. Cancelar mientras
+se piden permisos o se descarga el modelo vuelve al momento: el reconocedor
+numera cada sesión y un arranque que despierta tarde no abre el micrófono.
+Un fallo de reescritura dice la causa (plazo, Apple Intelligence no
+disponible, texto largo, respuesta no válida, selección ausente o cambiada).
+
 ## Actualización: reescritura real y Word (2026-09-23)
 
 - «Hazlo más breve» y otras instrucciones de reescritura generan una
@@ -94,3 +107,28 @@ cierra solo. El umbral aún requiere medición con micrófono real.
   Una prueba de consola con Foundation Models disponible devolvió una
   reescritura breve. Falta comprobar el flujo completo con micrófono y la
   interfaz en ejecución.
+
+## Actualización: panel más simple y dictado continuo (2026-10-02)
+
+- Panel: un título de estado, un botón principal y una línea que explica el
+  modo activo. «Qué puedo decir» lista ejemplos por grupo y «Opciones»
+  reúne Manos libres, ⌥Espacio, estilo e idioma. Decir «qué puedo decir»
+  abre los ejemplos. Las pruebas comprueban cada ejemplo contra el parser.
+- Las opciones se guardan en `UserDefaults` (`voice.*`). Las pruebas crean el
+  módulo con `preferences: nil` y no tocan preferencias reales.
+- Respuestas a una propuesta: además de «confirmar», «descartar», «repetir»
+  y «usar como texto», valen «sí», «dale», «no», «mejor no», «otra vez» y
+  «es texto». Las formas cortas solo cuentan con una propuesta a la vista;
+  sin ella son dictado.
+- Saltos: «nueva línea» y «nuevo párrafo» se insertan al momento en Manos
+  libres, como el resto del dictado. En el modo por turnos siguen pasando
+  por la propuesta. Dentro de una frase, `DictationCleaner` convierte
+  «nueva línea», «nuevo párrafo», «punto y aparte» y «abre/cierra
+  interrogación» o «exclamación». El estilo formal pone mayúscula al
+  empezar cada línea y punto al cerrarla.
+- `EditorSession.spacedDictation` antepone un espacio al dictado de Manos
+  libres cuando el texto anterior no termina en espacio, salto ni signo de
+  apertura. La inserción confirmada del modo por turnos (`insertText`) no
+  cambia.
+- `swift test --package-path Packages/EditorModules` pasó con 270 pruebas y
+  la app compila. Falta la sesión con micrófono y la interfaz en ejecución.
